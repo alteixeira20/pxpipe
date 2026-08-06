@@ -64,10 +64,33 @@ describe('fail-open retry body cloning scope', () => {
 
 describe('fail-open integration', () => {
   it('retries once as native text when transform setup throws before upstream', async () => {
-    const upstreamFetch = vi.fn(async () => new Response(
-      JSON.stringify({ type: 'message', content: [{ type: 'text', text: 'ok' }] }),
-      { status: 200, headers: { 'content-type': 'application/json' } },
-    ));
+    const inferenceUrls: string[] = [];
+    const upstreamFetch = vi.fn(async (input: string | URL | Request) => {
+      const url = typeof input === 'string'
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+      if (url.includes('/count_tokens')) {
+        return new Response(JSON.stringify({ input_tokens: 10 }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      inferenceUrls.push(url);
+      return new Response(JSON.stringify({
+        id: 'msg_test',
+        type: 'message',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'ok' }],
+        model: 'claude-fable-5',
+        stop_reason: 'end_turn',
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
     const observed = vi.fn();
     const handle = createFailOpenProxy({
       customFetch: upstreamFetch as typeof fetch,
@@ -80,7 +103,7 @@ describe('fail-open integration', () => {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
-        model: 'unsupported-test-model',
+        model: 'claude-fable-5',
         max_tokens: 8,
         messages: [{ role: 'user', content: 'hello' }],
       }),
@@ -89,11 +112,15 @@ describe('fail-open integration', () => {
     const response = await handle(request);
     expect(response.status).toBe(200);
     expect(response.headers.get('x-pxpipe-fail-open')).toBe('transform-error');
-    expect(upstreamFetch).toHaveBeenCalledTimes(1);
+    await response.text();
+
+    // Count-token probes are allowed, but the model inference itself must happen
+    // exactly once: the primary transform failed before any upstream request.
+    expect(inferenceUrls).toHaveLength(1);
 
     // The synthetic primary 502 is suppressed; telemetry describes the one real
     // upstream attempt that the caller actually received.
-    await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(observed).toHaveBeenCalledTimes(1);
     expect(observed.mock.calls[0]?.[0]?.status).toBe(200);
   });
