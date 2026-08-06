@@ -42,7 +42,9 @@ function upstream(): string {
 }
 
 function apiKey(): string | undefined {
-  return process.env.OPENAI_API_KEY ?? process.env.FEATHERLESS_API_KEY;
+  // Prefer the provider-specific credential when both are present. A developer
+  // may legitimately have an unrelated OPENAI_API_KEY in the same shell.
+  return process.env.FEATHERLESS_API_KEY ?? process.env.OPENAI_API_KEY;
 }
 
 function readCache(expectedUpstream = upstream()): CatalogCache | null {
