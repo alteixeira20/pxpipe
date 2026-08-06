@@ -1,5 +1,9 @@
-import { describe, expect, it } from 'vitest';
-import { isPxpipeTransformFailure, mayTransformRequest } from '../src/core/fail-open.js';
+import { describe, expect, it, vi } from 'vitest';
+import {
+  createFailOpenProxy,
+  isPxpipeTransformFailure,
+  mayTransformRequest,
+} from '../src/core/fail-open.js';
 
 describe('transform-only fail-open classifier', () => {
   it('recognizes the exact pre-upstream transform failure response', async () => {
@@ -55,5 +59,42 @@ describe('fail-open retry body cloning scope', () => {
     ['POST', 'https://local/v1/models'],
   ])('does not clone passthrough traffic: %s %s', (method, url) => {
     expect(mayTransformRequest(new Request(url, { method }))).toBe(false);
+  });
+});
+
+describe('fail-open integration', () => {
+  it('retries once as native text when transform setup throws before upstream', async () => {
+    const upstreamFetch = vi.fn(async () => new Response(
+      JSON.stringify({ type: 'message', content: [{ type: 'text', text: 'ok' }] }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    ));
+    const observed = vi.fn();
+    const handle = createFailOpenProxy({
+      customFetch: upstreamFetch as typeof fetch,
+      transform: () => {
+        throw new Error('renderer exploded');
+      },
+      onRequest: observed,
+    });
+    const request = new Request('http://127.0.0.1:47821/v1/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'unsupported-test-model',
+        max_tokens: 8,
+        messages: [{ role: 'user', content: 'hello' }],
+      }),
+    });
+
+    const response = await handle(request);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('x-pxpipe-fail-open')).toBe('transform-error');
+    expect(upstreamFetch).toHaveBeenCalledTimes(1);
+
+    // The synthetic primary 502 is suppressed; telemetry describes the one real
+    // upstream attempt that the caller actually received.
+    await Promise.resolve();
+    expect(observed).toHaveBeenCalledTimes(1);
+    expect(observed.mock.calls[0]?.[0]?.status).toBe(200);
   });
 });
