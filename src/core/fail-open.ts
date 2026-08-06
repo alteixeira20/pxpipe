@@ -4,6 +4,16 @@ const TRANSFORM_FAILURE_STATUS = 502;
 const TRANSFORM_FAILURE_MARKER = 'pxpipe transform failed';
 const SNIFF_LIMIT = 4 * 1024;
 
+type ProxyRequest = Parameters<ReturnType<typeof createProxy>>[0];
+
+/** `@cloudflare/workers-types` augments Request with host metadata generics while
+ * Node's Web Request is the unparameterized form. createProxy intentionally uses
+ * only standard Request fields, so normalize the structurally compatible value at
+ * this single boundary instead of leaking runtime-specific generics through the API. */
+function asProxyRequest(request: Request): ProxyRequest {
+  return request as unknown as ProxyRequest;
+}
+
 /** Only request shapes whose body the transform pipeline may consume need a retry
  * clone. Avoid teeing uploads/audio/arbitrary passthrough streams: a fail-open guard
  * must not become a hidden buffering tax on traffic it can never transform. */
@@ -76,15 +86,15 @@ export function createFailOpenProxy(
   });
 
   return async (request: Request): Promise<Response> => {
-    if (!mayTransformRequest(request)) return primary(request);
+    if (!mayTransformRequest(request)) return primary(asProxyRequest(request));
 
     // Clone only a model-request shape and before the primary consumes the stream.
     // The clone is read only if the primary returns the exact pre-upstream marker.
     const retryRequest = request.clone();
-    const response = await primary(request);
+    const response = await primary(asProxyRequest(request));
     if (!(await isPxpipeTransformFailure(response))) return response;
 
-    const retried = await fallback(retryRequest);
+    const retried = await fallback(asProxyRequest(retryRequest));
     const headers = new Headers(retried.headers);
     headers.set('x-pxpipe-fail-open', 'transform-error');
     return new Response(retried.body, {
