@@ -75,6 +75,27 @@ port matches only that port:
 pxpipe warp --route '127.0.0.1:8082/v1/*=http://127.0.0.1:47821' -- codex
 ```
 
+### Featherless.ai (Kimi-K3, etc.)
+
+pxpipe can proxy [Featherless.ai](https://featherless.ai) models such as
+`moonshotai/Kimi-K3`. The proxy discovers each model's vision capability
+automatically and applies image compression when profitable, with
+error-envelope fallback and a per-model circuit breaker.
+
+```bash
+PXPIPE_PROVIDER=featherless \
+OPENAI_UPSTREAM=https://api.featherless.ai \
+OPENAI_API_KEY="$FEATHERLESS_API_KEY" \
+pxpipe
+```
+
+Then point your OpenAI-compatible client at `http://127.0.0.1:47821/v1`.
+
+The incoming `Authorization` header is forwarded to Featherless unless
+`OPENAI_API_KEY` is set, in which case it overrides. Set
+`PXPIPE_FEATHERLESS_TRANSFORM` to `off` (pass-through), `auto` (default,
+discover vision support), or `force` (always compress).
+
 ## Offline export (no proxy)
 
 You can render text, files, or diffs to PNG pages without running the proxy or

@@ -610,12 +610,30 @@ export function renderContextMapFragment(
   );
 }
 
-// ---- recent requests table -----------------------------------------------
-
 function statusCls(status: number): string {
   if (status >= 500) return 'bad';
   if (status >= 400) return 'warn';
   return 'good';
+}
+
+function renderTransformationStateBadge(e: RecentRow): string {
+  const state = e.transformation_state;
+  if (state === 'transformed') {
+    return `<span class="badge badge-img">transformed</span>`;
+  }
+  if (state === 'fallback' || state === 'fallback-to-text') {
+    return `<span class="badge badge-fallback">fallback-to-text</span>`;
+  }
+  if (state === 'degraded' || state === 'capability-skipped' || state === 'skipped') {
+    const label = state === 'degraded' ? 'degraded' : 'capability-skipped';
+    return `<span class="badge badge-warn">${label}</span>`;
+  }
+  if (state === 'passthrough' || state === 'plain pass-through') {
+    return `<span class="badge badge-txt">plain pass-through</span>`;
+  }
+  return e.cc_added
+    ? `<span class="badge badge-img">transformed</span>`
+    : `<span class="badge badge-txt">plain pass-through</span>`;
 }
 
 export function renderRecentFragment(p: RecentPayload): string {
@@ -651,9 +669,7 @@ export function renderRecentFragment(p: RecentPayload): string {
                 : saved < 0
                   ? `<td class="num neg">${numFmt(saved)}${createNote}</td>`
                   : `<td class="num">0</td>`;
-            const imaged = e.cc_added
-              ? `<span class="badge badge-img">image</span>`
-              : `<span class="badge badge-txt">text</span>`;
+            const imaged = renderTransformationStateBadge(e);
             return (
               `<tr>` +
               `<td class="muted">${i + 1}</td>` +
@@ -1122,6 +1138,8 @@ const CSS = `
     border-radius: 999px; padding: 0 5px; margin-left: 4px; vertical-align: 1px; cursor: help; white-space: nowrap; }
   .badge-img { background: var(--img-tint); color: var(--img-ink); }
   .badge-txt { background: var(--txt-tint); color: var(--txt-ink); }
+  .badge-warn { background: var(--warn-tint); color: var(--warn); }
+  .badge-fallback { background: var(--bad-tint); color: var(--bad); }
 
   /* inspector */
   .viewer-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }

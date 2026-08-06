@@ -89,6 +89,8 @@ export interface GptHistoryProfile {
 export interface GptModelProfile {
   /** How this model's provider bills the rendered images as input tokens. */
   vision: GptVisionCost;
+  /** Image detail field sent in image_url parts ('auto' | 'original' | 'high' | 'low'). Defaults to 'auto'. */
+  imageDetail?: 'auto' | 'original' | 'low' | 'high';
   /** Cached-input list price ÷ uncached-input list price for this family.
    *  Savings reporting reads this instead of re-classifying the model id. */
   cacheReadRate: number;

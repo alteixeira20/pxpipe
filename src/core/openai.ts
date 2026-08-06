@@ -210,6 +210,8 @@ interface OpenAIResolvedOptions {
   reflow: boolean;
   collapseHistory: boolean;
   gptHistory?: Partial<GptHistoryOptions>;
+  imagePlacement?: 'synthetic_message' | 'merge_first_user';
+  imageDetail?: 'auto' | 'original' | 'low' | 'high';
 }
 
 const DEFAULTS: OpenAIResolvedOptions = {
@@ -232,6 +234,8 @@ function resolveOptions(opts: TransformOptions): OpenAIResolvedOptions {
     reflow: opts.reflow ?? DEFAULTS.reflow,
     collapseHistory: opts.collapseHistory ?? DEFAULTS.collapseHistory,
     gptHistory: opts.gptHistory,
+    imagePlacement: opts.imagePlacement,
+    imageDetail: opts.imageDetail,
   };
 }
 
@@ -475,12 +479,12 @@ function rewriteFlatToolsForGpt(tools: unknown[] | undefined): {
   return { tools: changed ? rewritten : tools, docs: docs.join('\n\n') };
 }
 
-function openAIImagePart(img: RenderedImage): OpenAIImagePart {
+function openAIImagePart(img: RenderedImage, detail: string = 'original'): OpenAIImagePart {
   return {
     type: 'image_url',
     image_url: {
       url: `data:image/png;base64,${bytesToBase64(img.png)}`,
-      detail: 'original', // GPT-5.6 preserves submitted dimensions; older profiles retain their own cost caps.
+      detail: detail as 'auto' | 'original' | 'high' | 'low',
     },
   };
 }
@@ -1052,7 +1056,9 @@ export async function transformOpenAIChatCompletions(
   const topDropped = droppedCodepointsTop(droppedCodepoints);
   if (topDropped) info.droppedCodepointsTop = topDropped;
 
-  const imageParts: OpenAIImagePart[] = images.map(openAIImagePart);
+  const placement = o.imagePlacement ?? 'synthetic_message';
+  const detailVal = o.imageDetail ?? profile.imageDetail ?? (placement === 'merge_first_user' ? 'auto' : 'original');
+  const imageParts: OpenAIImagePart[] = images.map((img) => openAIImagePart(img, detailVal));
   info.imageCount = images.length;
   // GPT savings basis: vision tokens the images actually cost vs the text tokens
   // the same content would have cost unproxied. req.tools is still the original
@@ -1079,31 +1085,57 @@ export async function transformOpenAIChatCompletions(
   info.nativeInjectedTokens = systemTexts.reduce((sum) => sum + gptTextTokens(CHAT_POINTER), 0)
     + gptTextTokens('[End of rendered GPT system/tool context.]')
     + gptTextTokens(slabFactSheet);
-  const slabUserMsg: OpenAIChatMessage = {
-    role: 'user',
-    content: [
+
+  if (placement === 'merge_first_user') {
+    const targetUserMsg = req.messages[firstUserIdx]!;
+    let existingUserParts: OpenAIContentPart[] = [];
+    if (typeof targetUserMsg.content === 'string') {
+      if (targetUserMsg.content.length > 0) {
+        existingUserParts = [{ type: 'text', text: targetUserMsg.content }];
+      }
+    } else if (Array.isArray(targetUserMsg.content)) {
+      existingUserParts = targetUserMsg.content;
+    }
+    targetUserMsg.content = [
       ...imageParts,
       ...(slabFactSheet ? [{ type: 'text', text: slabFactSheet } as OpenAIContentPart] : []),
       { type: 'text', text: '[End of rendered GPT system/tool context.]' },
-    ],
-  };
-  req.messages = [
-    ...req.messages.slice(0, firstUserIdx),
-    slabUserMsg,
-    ...req.messages.slice(firstUserIdx),
-  ];
+      ...existingUserParts,
+    ];
 
-  for (const msg of req.messages) {
-    if (msg.role !== 'system' && msg.role !== 'developer') continue;
-    if (!contentText(msg.content)) continue;
-    setTextContent(msg, CHAT_POINTER);
-  }
+    for (const msg of req.messages) {
+      if (msg.role !== 'system' && msg.role !== 'developer') continue;
+      if (!contentText(msg.content)) continue;
+      setTextContent(msg, CHAT_POINTER);
+    }
 
-  // Collapse the OLD conversation prefix into history image(s). The inserted slab
-  // item carries static images and is protected; the original opening user prompt
-  // remains collapsible history instead of looking like the live request.
-  if (o.collapseHistory) {
-    await applyChatHistoryCollapse(req, info, o, profile, firstUserIdx + 1);
+    if (o.collapseHistory) {
+      await applyChatHistoryCollapse(req, info, o, profile, firstUserIdx);
+    }
+  } else {
+    const slabUserMsg: OpenAIChatMessage = {
+      role: 'user',
+      content: [
+        ...imageParts,
+        ...(slabFactSheet ? [{ type: 'text', text: slabFactSheet } as OpenAIContentPart] : []),
+        { type: 'text', text: '[End of rendered GPT system/tool context.]' },
+      ],
+    };
+    req.messages = [
+      ...req.messages.slice(0, firstUserIdx),
+      slabUserMsg,
+      ...req.messages.slice(firstUserIdx),
+    ];
+
+    for (const msg of req.messages) {
+      if (msg.role !== 'system' && msg.role !== 'developer') continue;
+      if (!contentText(msg.content)) continue;
+      setTextContent(msg, CHAT_POINTER);
+    }
+
+    if (o.collapseHistory) {
+      await applyChatHistoryCollapse(req, info, o, profile, firstUserIdx + 1);
+    }
   }
 
   if (rewrittenTools !== undefined) req.tools = rewrittenTools;

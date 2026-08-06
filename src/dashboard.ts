@@ -125,6 +125,10 @@ export interface RecentRow {
   status: number;
   size_in?: number;
   compressed: boolean;
+  transformation_state?: 'transformed' | 'passthrough' | 'degraded' | 'skipped' | 'fallback' | 'capability-skipped' | 'fallback-to-text' | 'plain pass-through';
+  transformation_mode?: 'off' | 'auto' | 'force';
+  capability_decision?: string;
+  fallback_attempted?: boolean;
   cc_added?: number;
   input_tokens?: number;
   /** From /v1/messages `usage.output_tokens`. Identical with/without
@@ -1004,6 +1008,10 @@ export class DashboardState {
       model: ev.model,
       status: ev.status,
       compressed,
+      transformation_state: ev.transformation_state ?? (compressed ? 'transformed' : 'passthrough'),
+      transformation_mode: ev.transformation_mode,
+      capability_decision: ev.capability_decision,
+      fallback_attempted: ev.fallback_attempted,
       cc_added: compressed ? 1 : undefined,
       input_tokens: haveUsage ? inp : undefined,
       output_tokens: haveUsage ? out : undefined,

@@ -190,6 +190,18 @@ export interface TrackEvent {
   error?: string;
   /** First ~2 KiB of the upstream 4xx response body. */
   error_body?: string;
+  // Featherless observability:
+  provider?: string;
+  transformation_mode?: string;
+  transformation_state?: string;
+  capability_decision?: string;
+  capability_source?: string;
+  capability_cache_status?: string;
+  skip_reason?: string;
+  fallback_attempted?: boolean;
+  fallback_reason?: string;
+  fallback_result?: string;
+  upstream_attempt_count?: number;
   /** sha256[0..8] of the TRANSFORMED outgoing body — correlates payloads without persisting them. */
   req_body_sha8?: string;
   /** Gzipped+base64 TRANSFORMED body for 4xx, inlined when ≤ TRACK_BODY_INLINE_MAX. Node host writes sidecar for larger bodies. */
@@ -391,6 +403,20 @@ export function toTrackEvent(ev: ProxyEvent): TrackEvent {
     out.stop_reason = ev.stopReason;
     if (SAFETY_STOP_REASONS.has(ev.stopReason)) out.safety_flagged = true;
   }
+
+  // Featherless observability fields — only emitted when set (non-Featherless requests stay lean).
+  if (ev.provider) out.provider = ev.provider;
+  if (ev.transformation_mode) out.transformation_mode = ev.transformation_mode;
+  if (ev.transformation_state) out.transformation_state = ev.transformation_state;
+  if (ev.capability_decision) out.capability_decision = ev.capability_decision;
+  if (ev.capability_source) out.capability_source = ev.capability_source;
+  if (ev.capability_cache_status) out.capability_cache_status = ev.capability_cache_status;
+  if (ev.skip_reason) out.skip_reason = ev.skip_reason;
+  if (ev.fallback_attempted !== undefined) out.fallback_attempted = ev.fallback_attempted;
+  if (ev.fallback_reason) out.fallback_reason = ev.fallback_reason;
+  if (ev.fallback_result) out.fallback_result = ev.fallback_result;
+  if (ev.upstream_attempt_count !== undefined) out.upstream_attempt_count = ev.upstream_attempt_count;
+
   return out;
 }
 

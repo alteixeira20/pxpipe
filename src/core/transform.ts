@@ -133,6 +133,10 @@ export interface TransformOptions {
    *  for every block rendered to images. Off by default (entries inflate `info`;
    *  only a stateful harness can use them). */
   emitRecoverable?: boolean;
+  /** Image placement for OpenAI Chat Completions: 'synthetic_message' (default) vs 'merge_first_user'. */
+  imagePlacement?: 'synthetic_message' | 'merge_first_user';
+  /** Detail setting for image_url parts ('auto' | 'original' | 'low' | 'high'). */
+  imageDetail?: 'auto' | 'original' | 'low' | 'high';
 }
 
 const DEFAULTS: Required<TransformOptions> = {
@@ -157,6 +161,8 @@ const DEFAULTS: Required<TransformOptions> = {
   collapseHistory: true,
   gptHistory: {},
   model: '',
+  imagePlacement: 'synthetic_message',
+  imageDetail: 'original',
 };
 
 /**

@@ -25,11 +25,27 @@ import { pinCommandResponse, pinCommandResponseOpenAI } from './pin.js';
 import { parseGoogleModelFromPath, transformGoogleGenerateContent } from './google.js';
 import { isGeminiModel } from './gemini-model-profiles.js';
 import { resolveGptProfile } from './gpt-model-profiles.js';
+import {
+  buildFeatherlessUpstreamUrl,
+  detectProviderErrorEnvelope,
+  discoverFeatherlessCapability,
+  isCircuitBreakerOpen,
+  normalizeUpstreamRoot,
+  recordCircuitBreakerFailure,
+  recordCircuitBreakerSuccess,
+  type FeatherlessCapabilityDecision,
+  type FeatherlessCapabilityResult,
+  type FeatherlessTransformationState,
+  type FeatherlessTransformMode,
+} from './featherless.js';
 
 export interface ProxyConfig {
   /** 'cloudflare-ai-gateway': routes both families through gatewayBaseUrl;
    *  OpenAI paths drop the `/v1` prefix to match gateway shape. */
-  provider?: 'cloudflare-ai-gateway';
+  provider?: 'cloudflare-ai-gateway' | 'featherless';
+  featherlessTransformMode?: FeatherlessTransformMode;
+  /** Custom fetch implementation (for unit tests / mock servers). */
+  customFetch?: typeof fetch;
   /** Gateway base URL (account/gateway-scoped). Required when provider is set. */
   gatewayBaseUrl?: string;
   /** Extra headers injected on every upstream request (e.g. gateway auth). */
@@ -109,6 +125,18 @@ export interface ProxyEvent {
   /** Ground-truth char counts from the response stream, independent of usage.output_tokens.
    *  Absent when the body couldn't be scanned (5xx, unknown content-type). See OutputMeasurement. */
   measurement?: OutputMeasurement;
+  // Featherless / Observability fields:
+  provider?: string;
+  transformation_mode?: FeatherlessTransformMode;
+  transformation_state?: FeatherlessTransformationState;
+  capability_decision?: FeatherlessCapabilityDecision;
+  capability_source?: 'api' | 'cache' | 'override';
+  capability_cache_status?: 'hit' | 'miss' | 'bypass';
+  skip_reason?: string;
+  fallback_attempted?: boolean;
+  fallback_reason?: string;
+  fallback_result?: 'success' | 'failed' | 'not_attempted';
+  upstream_attempt_count?: number;
 }
 
 /** Max chars of 4xx error body captured on ProxyEvent — enough for Anthropic's full error JSON. */
@@ -288,6 +316,124 @@ async function sha256Bytes(body: Uint8Array): Promise<string> {
 
 async function sha256Text(value: string): Promise<string> {
   return sha256Bytes(new TextEncoder().encode(value));
+}
+
+/**
+ * Inspects a Response (both application/json and text/event-stream) for provider error envelopes.
+ * For SSE, reads only a bounded prelude. If valid completion deltas are present, or no error
+ * envelope is found, returns isError: false and a reconstructed Response containing all bytes.
+ */
+export async function inspectResponseForErrorEnvelope(res: Response): Promise<{
+  isError: boolean;
+  errorMsg?: string;
+  response: Response;
+}> {
+  if (!res.ok) {
+    return { isError: true, errorMsg: `http_status_${res.status}`, response: res };
+  }
+  const contentType = res.headers.get('content-type') ?? '';
+  if (contentType.includes('application/json')) {
+    const text = await res.text();
+    const err = detectProviderErrorEnvelope(text);
+    const newRes = new Response(text, {
+      status: res.status,
+      statusText: res.statusText,
+      headers: res.headers,
+    });
+    return err
+      ? { isError: true, errorMsg: err, response: newRes }
+      : { isError: false, response: newRes };
+  }
+  if (contentType.includes('text/event-stream') && res.body) {
+    const reader = res.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let totalBytes = 0;
+    const PRELUDE_MAX_BYTES = 4096;
+    let hasDeltas = false;
+    let providerError: string | null = null;
+    let doneReading = false;
+
+    while (totalBytes < PRELUDE_MAX_BYTES && !doneReading) {
+      const { done, value } = await reader.read();
+      if (done) {
+        doneReading = true;
+        break;
+      }
+      if (value) {
+        chunks.push(value);
+        totalBytes += value.byteLength;
+        const preludeText = new TextDecoder().decode(value);
+        if (
+          preludeText.includes('"delta"') ||
+          preludeText.includes('"content"') ||
+          preludeText.includes('"reasoning"') ||
+          preludeText.includes('"thinking"') ||
+          preludeText.includes('"tool_calls"') ||
+          preludeText.includes('"function_call"')
+        ) {
+          hasDeltas = true;
+          break;
+        }
+        const lines = preludeText.split('\n');
+        for (const line of lines) {
+          const trimmed = line.trim();
+          let rawJson = trimmed;
+          if (trimmed.startsWith('data:')) {
+            rawJson = trimmed.slice(5).trim();
+          }
+          const err = detectProviderErrorEnvelope(rawJson);
+          if (err) {
+            providerError = err;
+            break;
+          }
+        }
+        if (providerError) break;
+      }
+    }
+
+    const reconstructedStream = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        if (chunks.length > 0) {
+          controller.enqueue(chunks.shift()!);
+          return;
+        }
+        if (doneReading) {
+          controller.close();
+          return;
+        }
+        try {
+          const { done, value } = await reader.read();
+          if (done) {
+            doneReading = true;
+            controller.close();
+          } else if (value) {
+            controller.enqueue(value);
+          }
+        } catch (err) {
+          controller.error(err);
+        }
+      },
+      cancel(reason) {
+        return reader.cancel(reason);
+      },
+    });
+
+    const newRes = new Response(reconstructedStream, {
+      status: res.status,
+      statusText: res.statusText,
+      headers: res.headers,
+    });
+
+    if (hasDeltas) {
+      return { isError: false, response: newRes };
+    }
+    if (providerError) {
+      return { isError: true, errorMsg: providerError, response: newRes };
+    }
+    return { isError: false, response: newRes };
+  }
+
+  return { isError: false, response: res };
 }
 
 /**
@@ -925,6 +1071,11 @@ export function resolveUpstreams(config: ProxyConfig): {
     }
     return { anthropic: `${base}/anthropic`, openai: `${base}/openai`, stripOpenAIV1: true };
   }
+  if (config.provider === 'featherless') {
+    const raw = config.openAIUpstream ?? config.upstream ?? 'https://api.featherless.ai';
+    const base = normalizeUpstreamRoot(raw);
+    return { anthropic: base, openai: base, stripOpenAIV1: false };
+  }
   return {
     anthropic: (config.upstream ?? DEFAULT_UPSTREAM).replace(/\/+$/, ''),
     openai: (config.openAIUpstream ?? DEFAULT_OPENAI_UPSTREAM).replace(/\/+$/, ''),
@@ -1106,6 +1257,17 @@ export function createProxy(config: ProxyConfig = {}) {
           reqBodyGz,
           measurement,
           stopReason,
+          provider: config.provider ?? (isGoogleRoute ? 'google' : isOpenAIChat || isOpenAIResponses ? 'openai' : 'anthropic'),
+          transformation_mode: featherlessProvider ? featherlessMode : undefined,
+          transformation_state: featherlessProvider ? transformationState : undefined,
+          capability_decision: featherlessProvider ? capabilityDecision : undefined,
+          capability_source: featherlessProvider ? capabilitySource : undefined,
+          capability_cache_status: featherlessProvider ? capabilityCacheStatus : undefined,
+          skip_reason: featherlessProvider ? skipReason : undefined,
+          fallback_attempted: featherlessProvider ? fallbackAttempted : undefined,
+          fallback_reason: featherlessProvider ? fallbackReason : undefined,
+          fallback_result: featherlessProvider ? fallbackResult : undefined,
+          upstream_attempt_count: featherlessProvider ? upstreamAttemptCount : undefined,
         });
       };
       void finalize();
@@ -1144,6 +1306,19 @@ export function createProxy(config: ProxyConfig = {}) {
     let bridgedChatMessages = false;
     let modelRouteForRequest: 'openai' | 'cloudflare' | undefined;
 
+    let featherlessProvider = config.provider === 'featherless';
+    let featherlessMode: FeatherlessTransformMode = config.featherlessTransformMode ?? 'auto';
+    let capabilityDecision: FeatherlessCapabilityDecision | undefined;
+    let capabilitySource: 'api' | 'cache' | 'override' | undefined;
+    let capabilityCacheStatus: 'hit' | 'miss' | 'bypass' | undefined;
+    let transformationState: FeatherlessTransformationState | undefined;
+    let skipReason: string | undefined;
+    let fallbackAttempted = false;
+    let fallbackReason: string | undefined;
+    let fallbackResult: 'success' | 'failed' | 'not_attempted' | undefined = 'not_attempted';
+    let upstreamAttemptCount = 1;
+    let originalBodyBytes: Uint8Array | undefined;
+
     // Two count_tokens probes on the pre-compression body (see docs/HISTORY_CACHE_MODEL.md):
     //   baselinePromise          → full-body input_tokens
     //   baselineCacheablePromise → input_tokens truncated at last cache_control marker
@@ -1154,6 +1329,7 @@ export function createProxy(config: ProxyConfig = {}) {
 
     if (isMessages || isOpenAIChat || isOpenAIResponses || isGoogle) {
       const bodyIn = new Uint8Array(await req.arrayBuffer());
+      originalBodyBytes = bodyIn;
       try {
         const transformOpts =
           typeof config.transform === 'function' ? config.transform() : config.transform;
@@ -1202,21 +1378,65 @@ export function createProxy(config: ProxyConfig = {}) {
         bridgedChatMessages = forceChat;
         const chatStamp = bridgedChatMessages ? routedModel : undefined;
         const effectiveModel = (bridgedGptMessages || bridgedChatMessages) ? routedModel : model;
+
+        let featherlessShouldCompress = true;
+        if (featherlessProvider) {
+          const targetM = effectiveModel ?? model ?? 'moonshotai/Kimi-K3';
+          if (featherlessMode === 'off') {
+            featherlessShouldCompress = false;
+            skipReason = 'off_mode';
+            transformationState = 'passthrough';
+            capabilityDecision = 'disabled';
+          } else if (featherlessMode === 'auto') {
+            if (isCircuitBreakerOpen('featherless', upstreamBase, targetM)) {
+              featherlessShouldCompress = false;
+              skipReason = 'circuit_breaker_open';
+              transformationState = 'skipped';
+              capabilityDecision = 'disabled';
+            } else {
+              const authHeader = req.headers.get('authorization') ?? undefined;
+              const fetchFn = config.customFetch ?? fetch;
+              const cap = await discoverFeatherlessCapability(upstreamBase, targetM, authHeader, fetchFn);
+              capabilityDecision = cap.decision;
+              capabilitySource = cap.source;
+              capabilityCacheStatus = cap.cacheStatus;
+              if (!cap.visionSupported) {
+                featherlessShouldCompress = false;
+                skipReason = cap.decision === 'discovery_failed' ? 'discovery_failed' : 'no_vision_capability';
+                transformationState = cap.decision === 'discovery_failed' ? 'degraded' : 'skipped';
+              } else {
+                capabilityDecision = 'capable';
+              }
+            }
+          } else if (featherlessMode === 'force') {
+            capabilityDecision = 'capable';
+            capabilitySource = 'override';
+            capabilityCacheStatus = 'bypass';
+          }
+        }
+
+        const explicitModelsSet = typeof process.env.PXPIPE_MODELS === 'string' && process.env.PXPIPE_MODELS.trim().length > 0;
+        const isFeatherlessEligible = featherlessProvider
+          ? (explicitModelsSet ? isPxpipeSupportedGptModel(model) : true) && featherlessShouldCompress
+          : false;
+
         const modelOk = isGoogle
           ? isGeminiModel(model) && isPxpipeSupportedModel(model)
           : isMessages
             ? (messagesAnthropic && isPxpipeSupportedModel(model))
               || bridgedGptMessages
               || (bridgedChatMessages && isPxpipeSupportedGptModel(effectiveModel))
-            : isPxpipeSupportedGptModel(model);
+            : featherlessProvider
+              ? isFeatherlessEligible
+              : isPxpipeSupportedGptModel(model);
         // Compression eligibility and telemetry follow the model that actually
         // receives the request, not Claude Code's local gateway alias.
         if ((bridgedGptMessages || bridgedChatMessages) && effectiveModel) {
           requestModel = effectiveModel;
         }
-        const effectiveOpts = modelOk
-          ? transformOpts
-          : { ...transformOpts, compress: false };
+        const effectiveOpts: TransformOptions = (modelOk
+          ? (featherlessProvider ? { ...transformOpts, imagePlacement: 'merge_first_user' as const, imageDetail: 'auto' as const } : transformOpts)
+          : { ...transformOpts, compress: false }) ?? { compress: false };
         const bridgeBody = bridgedGptMessages
           ? (() => {
               const bridged = JSON.parse(new TextDecoder().decode(
@@ -1276,7 +1496,15 @@ export function createProxy(config: ProxyConfig = {}) {
             r.info.baselineProbeStatus = 'ok';
           }
         }
-        if (!modelOk) r.info.reason = 'unsupported_model';
+        if (!modelOk) r.info.reason = skipReason ?? 'unsupported_model';
+        if (r.info.compressed) {
+          if (featherlessProvider) transformationState = 'transformed';
+        } else if (!transformationState) {
+          if (featherlessProvider) {
+            transformationState = 'passthrough';
+            if (r.info.reason && !skipReason) skipReason = r.info.reason;
+          }
+        }
         bodyOut = r.body as unknown as BodyInit; // TS narrows Uint8Array away from BodyInit
         info = r.info;
         reqBodyBytes = r.body;
@@ -1369,6 +1597,7 @@ export function createProxy(config: ProxyConfig = {}) {
         !(Number.isFinite(declaredLength) && declaredLength > MODEL_SNIFF_MAX_BYTES);
       if (worthBuffering) {
         const bodyIn = new Uint8Array(await req.arrayBuffer());
+        originalBodyBytes = bodyIn;
         requestModel ??= readModelField(bodyIn) ?? undefined;
         bodyOut = bodyIn;
       } else {
@@ -1402,22 +1631,24 @@ export function createProxy(config: ProxyConfig = {}) {
 
     applyGatewayHeaders(outHeaders);
 
+    let upstreamUrl: string;
     // Gateway OpenAI routes drop the `/v1` prefix; provider-prefixed passthrough
     // routes keep their full path so ocproxy-style upstreams see `/openai/*`,
     // `/google-ai-studio/*`, etc. exactly as the client sent them.
-    // The chat bridge forwards to the configured Cloudflare upstream at its
-    // /chat/completions endpoint (chatCompletionsUrl normalizes a bare base,
-    // a /v1 base, or a full …/chat/completions URL). Every other route appends
-    // a path to its resolved base.
-    let upstreamUrl: string;
     if (bridgedChatMessages) {
+      // The chat bridge forwards to the configured Cloudflare upstream at its
+      // /chat/completions endpoint (chatCompletionsUrl normalizes a bare base,
+      // a /v1 base, or a full …/chat/completions URL). Every other route appends
+      // a path to its resolved base.
       upstreamUrl = chatCompletionsUrl(config.cloudflareUpstream ?? '');
     } else {
       const outPath = bridgedGptMessages
         ? (routes.stripOpenAIV1 ? '/responses' : '/v1/responses')
         : isOpenAIPath && routes.stripOpenAIV1 ? path.replace(/^\/v1(?=\/)/, '') : path;
       const requestUpstreamBase = bridgedGptMessages ? openAIUpstream : upstreamBase;
-      upstreamUrl = requestUpstreamBase + outPath;
+      upstreamUrl = config.provider === 'featherless'
+        ? buildFeatherlessUpstreamUrl(requestUpstreamBase, outPath)
+        : requestUpstreamBase + outPath;
     }
     let releaseInFlight = (): void => {};
     if (reqBodySha256 && duplicateHoldMs > 0) {
@@ -1465,60 +1696,131 @@ export function createProxy(config: ProxyConfig = {}) {
     }
     // One controller for the whole exchange: headers timeout, stall watchdog and client
     // disconnect all abort through it, so nothing can hold the socket open indefinitely.
-    const upstreamAbort = new AbortController();
+    const clientDisconnectController = new AbortController();
+    let clientAbortListener: (() => void) | undefined;
+    if (req.signal) {
+      if (req.signal.aborted) {
+        clientDisconnectController.abort(req.signal.reason ?? new Error('pxpipe: client disconnected'));
+      } else {
+        clientAbortListener = () => {
+          clientDisconnectController.abort(req.signal.reason ?? new Error('pxpipe: client disconnected'));
+        };
+        req.signal.addEventListener('abort', clientAbortListener, { once: true });
+      }
+    }
+
+    let activeAttemptAbort: AbortController | undefined;
     let timeoutKind: 'headers' | 'idle' | undefined;
-    let headersTimer: ReturnType<typeof setTimeout> | undefined;
-    // Raced explicitly rather than trusting the fetch implementation to reject on
-    // abort — the headers phase must be bounded even if the signal is ignored.
     const HEADERS_TIMEOUT = Symbol('headers-timeout');
-    const headersDeadline = new Promise<typeof HEADERS_TIMEOUT>((resolve) => {
-      if (headersTimeoutMs <= 0) return;
-      headersTimer = setTimeout(() => {
-        headersTimer = undefined;
-        timeoutKind = 'headers';
-        upstreamAbort.abort(new Error('pxpipe: upstream headers timeout'));
-        resolve(HEADERS_TIMEOUT);
-      }, headersTimeoutMs);
-    });
-    const clearHeadersTimer = (): void => {
-      if (headersTimer !== undefined) {
-        clearTimeout(headersTimer);
-        headersTimer = undefined;
+
+    let upstreamRes: Response;
+    const executeFetch = async (targetBody: BodyInit | null) => {
+      const fetchFn = config.customFetch ?? fetch;
+      const attemptAbort = new AbortController();
+      activeAttemptAbort = attemptAbort;
+
+      let attemptHeadersTimer: ReturnType<typeof setTimeout> | undefined;
+      let onClientAbort: (() => void) | undefined;
+
+      if (clientDisconnectController.signal.aborted) {
+        attemptAbort.abort(clientDisconnectController.signal.reason ?? new Error('pxpipe: client disconnected'));
+      } else {
+        onClientAbort = () => {
+          attemptAbort.abort(clientDisconnectController.signal.reason ?? new Error('pxpipe: client disconnected'));
+        };
+        clientDisconnectController.signal.addEventListener('abort', onClientAbort, { once: true });
+      }
+
+      // Raced explicitly rather than trusting the fetch implementation to reject on
+      // abort — the headers phase must be bounded even if the signal is ignored.
+      const attemptHeadersDeadline = new Promise<typeof HEADERS_TIMEOUT>((resolve) => {
+        if (headersTimeoutMs <= 0) return;
+        attemptHeadersTimer = setTimeout(() => {
+          attemptHeadersTimer = undefined;
+          timeoutKind = 'headers';
+          attemptAbort.abort(new Error('pxpipe: upstream headers timeout'));
+          resolve(HEADERS_TIMEOUT);
+        }, headersTimeoutMs);
+      });
+      try {
+        const upstreamFetch = fetchFn(upstreamUrl, {
+          method: req.method,
+          headers: outHeaders,
+          body: targetBody,
+          signal: attemptAbort.signal,
+          // duplex is required by spec when sending a stream as body
+          ...(targetBody instanceof ReadableStream ? { duplex: 'half' } : {}),
+        } as RequestInit);
+        const raced =
+          headersTimeoutMs > 0 ? await Promise.race([upstreamFetch, attemptHeadersDeadline]) : await upstreamFetch;
+        if (raced === HEADERS_TIMEOUT) {
+          // Abandoned: keep its eventual rejection from surfacing as unhandled.
+          void upstreamFetch.catch(() => undefined);
+          throw new Error('pxpipe: upstream headers timeout');
+        }
+        return { res: raced, abortController: attemptAbort };
+      } finally {
+        if (attemptHeadersTimer !== undefined) {
+          clearTimeout(attemptHeadersTimer);
+          attemptHeadersTimer = undefined;
+        }
+        if (onClientAbort) {
+          clientDisconnectController.signal.removeEventListener('abort', onClientAbort);
+        }
       }
     };
 
-    let upstreamRes: Response;
     try {
-      const upstreamFetch = fetch(upstreamUrl, {
-        method: req.method,
-        headers: outHeaders,
-        body: bodyOut,
-        signal: upstreamAbort.signal,
-        // duplex is required by spec when sending a stream as body
-        ...(bodyOut instanceof ReadableStream ? { duplex: 'half' } : {}),
-      } as RequestInit);
-      const raced =
-        headersTimeoutMs > 0 ? await Promise.race([upstreamFetch, headersDeadline]) : await upstreamFetch;
-      clearHeadersTimer();
-      if (raced === HEADERS_TIMEOUT) {
-        // Abandoned: keep its eventual rejection from surfacing as unhandled.
-        void upstreamFetch.catch(() => undefined);
-        throw new Error('pxpipe: upstream headers timeout');
-      }
-      upstreamRes = raced;
+      const attempt1 = await executeFetch(bodyOut);
+      upstreamRes = attempt1.res;
       // Watch the raw upstream stream, before any bridge re-encodes it.
       upstreamRes = withIdleTimeout(upstreamRes, headersTimeoutMs, idleTimeoutMs, () => {
         timeoutKind = 'idle';
-        upstreamAbort.abort(new Error('pxpipe: upstream stalled'));
+        attempt1.abortController.abort(new Error('pxpipe: upstream stalled'));
       });
       if (bridgedGptMessages) {
         upstreamRes = await openAIResponsesToAnthropicResponse(upstreamRes, requestModel ?? '');
       } else if (bridgedChatMessages) {
         upstreamRes = await openAIChatToAnthropicResponse(upstreamRes, requestModel ?? '');
       }
+
+      // Safe Fallback logic for transformed Featherless/Kimi requests strictly when provider === 'featherless':
+      if (featherlessProvider && info?.compressed && originalBodyBytes && !fallbackAttempted) {
+        const targetM = requestModel ?? 'moonshotai/Kimi-K3';
+        const inspection = await inspectResponseForErrorEnvelope(upstreamRes);
+        upstreamRes = inspection.response;
+
+        if (inspection.isError) {
+          recordCircuitBreakerFailure('featherless', upstreamBase, targetM);
+          fallbackAttempted = true;
+          fallbackReason = !upstreamRes.ok ? `http_status_${upstreamRes.status}` : (inspection.errorMsg ?? 'provider_error_envelope');
+          const attempt2 = await executeFetch(originalBodyBytes as unknown as BodyInit);
+          upstreamAttemptCount = 2;
+          const retryInspection = await inspectResponseForErrorEnvelope(attempt2.res);
+          let retryResFinal = retryInspection.response;
+          retryResFinal = withIdleTimeout(retryResFinal, headersTimeoutMs, idleTimeoutMs, () => {
+            timeoutKind = 'idle';
+            attempt2.abortController.abort(new Error('pxpipe: upstream stalled'));
+          });
+          if (!retryInspection.isError) {
+            fallbackResult = 'success';
+            transformationState = 'fallback';
+            upstreamRes = retryResFinal;
+          } else {
+            fallbackResult = 'failed';
+            transformationState = 'fallback';
+            upstreamRes = retryResFinal;
+          }
+        } else {
+          recordCircuitBreakerSuccess('featherless', upstreamBase, targetM);
+          transformationState = 'transformed';
+        }
+      }
     } catch (e) {
-      clearHeadersTimer();
       releaseInFlight();
+      if (req.signal && clientAbortListener) {
+        req.signal.removeEventListener('abort', clientAbortListener);
+      }
       if (timeoutKind) {
         const detail = timeoutKind === 'headers'
           ? `no response headers within ${headersTimeoutMs}ms`
@@ -1549,6 +1851,9 @@ export function createProxy(config: ProxyConfig = {}) {
         teeForUsage(upstreamRes));
     } catch (e) {
       releaseInFlight();
+      if (req.signal && clientAbortListener) {
+        req.signal.removeEventListener('abort', clientAbortListener);
+      }
       throw e;
     }
 
@@ -1585,18 +1890,25 @@ export function createProxy(config: ProxyConfig = {}) {
         stopReason,
       );
     }).finally(() => {
-      clearHeadersTimer();
       releaseInFlight();
+      if (req.signal && clientAbortListener) {
+        req.signal.removeEventListener('abort', clientAbortListener);
+      }
     });
 
     // Client disconnect: drop the lease immediately and abort upstream, rather than
     // waiting on scanner promises that a wedged connection would never settle.
     const clientBody = teed.body
       ? withClientDisconnect(teed.body, () => {
-          clearHeadersTimer();
           releaseInFlight();
-          if (!upstreamAbort.signal.aborted) {
-            upstreamAbort.abort(new Error('pxpipe: client disconnected'));
+          if (req.signal && clientAbortListener) {
+            req.signal.removeEventListener('abort', clientAbortListener);
+          }
+          if (!clientDisconnectController.signal.aborted) {
+            clientDisconnectController.abort(new Error('pxpipe: client disconnected'));
+          }
+          if (activeAttemptAbort && !activeAttemptAbort.signal.aborted) {
+            activeAttemptAbort.abort(new Error('pxpipe: client disconnected'));
           }
         })
       : null;

@@ -36,6 +36,7 @@ import {
   dashboardPath,
   type DashboardRoute,
 } from './dashboard.js';
+import { setPxpipeVersion } from './core/featherless.js';
 
 /** Runtime config. The core transform tuning comes from DEFAULTS in
  *  transform.ts; startup knobs cover deployment plus emergency GPT scope
@@ -53,7 +54,8 @@ interface RuntimeConfig {
   cloudflareApiKey?: string;
   openAIModels?: string[];
   cloudflareModels?: string[];
-  provider?: 'cloudflare-ai-gateway';
+  provider?: 'cloudflare-ai-gateway' | 'featherless';
+  featherlessTransformMode?: 'off' | 'auto' | 'force';
   gatewayBaseUrl?: string;
   gatewayHeaders?: Record<string, string>;
   eventsFile: string;
@@ -178,6 +180,7 @@ function parseCli(argv: string[]): RuntimeConfig {
     openAIModels: parseModels(process.env.OPENAI_MODELS),
     cloudflareModels: parseModels(process.env.CLOUDFLARE_MODELS),
     provider: parseProvider(process.env.PXPIPE_PROVIDER),
+    featherlessTransformMode: parseFeatherlessTransform(process.env.PXPIPE_FEATHERLESS_TRANSFORM),
     gatewayBaseUrl: process.env.PXPIPE_GATEWAY_BASE_URL,
     gatewayHeaders: parseGatewayHeaders(process.env.PXPIPE_GATEWAY_HEADERS),
     eventsFile:
@@ -189,10 +192,18 @@ function parseCli(argv: string[]): RuntimeConfig {
   };
 }
 
-function parseProvider(v: string | undefined): 'cloudflare-ai-gateway' | undefined {
+function parseProvider(v: string | undefined): 'cloudflare-ai-gateway' | 'featherless' | undefined {
   if (v === undefined || v === '') return undefined;
-  if (v === 'cloudflare-ai-gateway') return v;
+  if (v === 'cloudflare-ai-gateway' || v === 'featherless') return v;
   console.error(`[pxpipe] unknown PXPIPE_PROVIDER: ${v}`);
+  process.exit(2);
+}
+
+function parseFeatherlessTransform(v: string | undefined): 'off' | 'auto' | 'force' {
+  if (v === undefined || v === '') return 'auto';
+  const norm = v.trim().toLowerCase();
+  if (norm === 'off' || norm === 'auto' || norm === 'force') return norm as 'off' | 'auto' | 'force';
+  console.error(`[pxpipe] unknown PXPIPE_FEATHERLESS_TRANSFORM: ${v}`);
   process.exit(2);
 }
 
@@ -238,9 +249,19 @@ Environment:
   CLOUDFLARE_MODELS       comma-separated exact model ids routed to Cloudflare
   CLOUDFLARE_ACCOUNT_ID   with CLOUDFLARE_API_TOKEN, zero-config Cloudflare
   CLOUDFLARE_API_TOKEN    Workers AI endpoint and bearer token
-  PXPIPE_PROVIDER         optional: 'cloudflare-ai-gateway' — route both API
-                          families through one gateway base URL
-  PXPIPE_GATEWAY_BASE_URL gateway base URL (required with PXPIPE_PROVIDER)
+  PXPIPE_PROVIDER         optional provider mode:
+                            cloudflare-ai-gateway — route both API families
+                              through one gateway base URL
+                            featherless — Featherless.ai OpenAI-compatible
+                              endpoint with vision capability discovery,
+                              error-envelope fallback, and circuit breaker
+  PXPIPE_FEATHERLESS_TRANSFORM
+                          controls Featherless vision transform:
+                            off   — pass-through, no image compression
+                            auto  — (default) discover model vision support
+                            force — always apply image compression
+  PXPIPE_GATEWAY_BASE_URL gateway base URL (required with PXPIPE_PROVIDER
+                          when provider is cloudflare-ai-gateway)
   PXPIPE_GATEWAY_HEADERS  extra upstream headers: JSON object or k=v;k2=v2
   PXPIPE_MODELS           comma-separated model bases to image (Claude/Gemini/GPT/Grok);
                           default claude-fable-5,gemini-3.6-flash (Sol/Opus/GPT-5.5/Grok opt-in);
@@ -259,6 +280,14 @@ Use with Claude Code:
 
 Use with OpenAI-compatible GPT clients:
   OPENAI_BASE_URL=http://127.0.0.1:47821/v1
+
+Use with Featherless.ai (Kimi-K3, etc.):
+  PXPIPE_PROVIDER=featherless \\
+  OPENAI_UPSTREAM=https://api.featherless.ai \\
+  OPENAI_API_KEY=$FEATHERLESS_API_KEY \\
+  pxpipe
+  The incoming Authorization header is forwarded to the upstream unless
+  OPENAI_API_KEY is set, in which case OPENAI_API_KEY overrides it.
 `);
 }
 
@@ -274,6 +303,13 @@ function printVersion(): void {
   const injected = typeof __PXPIPE_VERSION__ === 'string' ? __PXPIPE_VERSION__ : undefined;
   console.log(injected ?? process.env.npm_package_version ?? 'unknown');
 }
+
+// Inject version into featherless module for User-Agent headers.
+setPxpipeVersion(
+  typeof __PXPIPE_VERSION__ === 'string'
+    ? __PXPIPE_VERSION__
+    : process.env.npm_package_version ?? 'unknown',
+);
 
 // ---- node:http <-> Web Request/Response bridge ---------------------------
 
