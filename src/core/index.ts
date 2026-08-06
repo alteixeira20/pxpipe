@@ -4,9 +4,11 @@ export {
   isPxpipeSupportedGptModel,
   isPxpipeSupportedModel,
   setAllowedModelBases,
+  setCompressionSafetyScope,
   shouldTransformAnthropicMessages,
   type PxpipeApplicabilityInput,
   type PxpipeApplicabilityReason,
+  type PxpipeSafetyScope,
 } from './applicability.js';
 export {
   buildCountTokensBodies,
@@ -42,7 +44,7 @@ export {
 } from './safety-policy.js';
 export { transformOpenAIChatCompletions, transformOpenAIResponses, resolveVisionCost, openAIVisionTokens } from './openai.js';
 export { createProxy, type ProxyConfig, type ProxyEvent } from './proxy.js';
-export { createFailOpenProxy, isPxpipeTransformFailure } from './fail-open.js';
+export { createFailOpenProxy, isPxpipeTransformFailure, mayTransformRequest } from './fail-open.js';
 export {
   assertProviderId,
   createProviderRouter,
