@@ -36,6 +36,16 @@ export {
 export { transformOpenAIChatCompletions, transformOpenAIResponses, resolveVisionCost, openAIVisionTokens } from './openai.js';
 export { createProxy, type ProxyConfig, type ProxyEvent } from './proxy.js';
 export {
+  assertProviderId,
+  createProviderRouter,
+  parseProviderRoute,
+  type ParsedProviderRoute,
+  type ProviderProtocol,
+  type ProviderRouteDefinition,
+  type ProviderRouterConfig,
+  type ProviderRouterInspection,
+} from './provider-router.js';
+export {
   computeActualInputEff,
   computeBaselineInputEff,
   CACHE_CREATE_RATE,
