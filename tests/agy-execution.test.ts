@@ -5,6 +5,7 @@ import {
   parseAgyBatchArgs,
   shouldStopForFailure,
 } from '../src/agy-execution.js';
+import type { AgyFailure, AgyFailureKind } from '../src/agy.js';
 
 describe('AGY batch option parsing', () => {
   it('parses every execution guard and preserves AGY arguments', () => {
@@ -67,9 +68,10 @@ describe('AGY protective input accounting', () => {
 });
 
 describe('AGY systemic failure stop policy', () => {
-  const failure = (kind: Parameters<typeof shouldStopForFailure>[0] extends infer T
-    ? T extends { kind: infer K } ? K : never
-    : never) => ({ kind, safeMessage: String(kind) } as NonNullable<Parameters<typeof shouldStopForFailure>[0]>);
+  const failure = (kind: AgyFailureKind): AgyFailure => ({
+    kind,
+    safeMessage: String(kind),
+  });
 
   it('always stops on quota when quota is selected', () => {
     expect(shouldStopForFailure(failure('quota_exhausted'), new Set(['quota']))).toBe(true);
