@@ -27,7 +27,7 @@ function baseModelId(model: string): string {
 
 /** Dashboard runtime override; null = fall back to PXPIPE_MODELS env / built-in default. In-memory only. */
 let runtimeModelBases: readonly string[] | null = null;
-/** Host-selected semantic safety profile. null keeps library/back-compat behavior. */
+/** Worker/host-selected safety profile. Node falls back to PXPIPE_PROFILE directly. */
 let runtimeSafetyScope: PxpipeSafetyScope | null = null;
 
 /**
@@ -45,6 +45,22 @@ const SAFE_VALIDATED_MODEL_BASES = ['claude-fable-5'];
 
 function falsey(v: string): boolean {
   return /^(0|false|no|off|none)$/i.test(v.trim());
+}
+
+function envSafetyScope(): PxpipeSafetyScope {
+  if (typeof process === 'undefined') return 'coding-safe';
+  const raw = (process.env?.PXPIPE_PROFILE ?? '').trim().toLowerCase();
+  if (!raw || raw === 'safe' || raw === 'coding' || raw === 'coding-safe') return 'coding-safe';
+  if (raw === 'balanced') return 'balanced';
+  if (raw === 'aggressive' || raw === 'legacy') return 'aggressive';
+  if (raw === 'off' || raw === 'disabled' || raw === 'passthrough') return 'passthrough';
+  // Startup profile validation reports the configuration error. Until then, fail
+  // closed rather than allowing an unknown profile to broaden model eligibility.
+  return 'passthrough';
+}
+
+function activeSafetyScope(): PxpipeSafetyScope {
+  return runtimeSafetyScope ?? envSafetyScope();
 }
 
 /** PXPIPE_MODELS env / built-in default, ignoring the runtime override. One CSV
@@ -68,8 +84,9 @@ function modelBaseMatches(id: string, candidate: string): boolean {
 }
 
 function safetyAllowsConfiguredBase(candidate: string): boolean {
-  if (runtimeSafetyScope === 'passthrough') return false;
-  if (runtimeSafetyScope !== 'coding-safe' && runtimeSafetyScope !== 'balanced') return true;
+  const scope = activeSafetyScope();
+  if (scope === 'passthrough') return false;
+  if (scope !== 'coding-safe' && scope !== 'balanced') return true;
   const base = baseModelId(candidate).toLowerCase();
   const unqualified = unqualifiedModelId(base);
   return SAFE_VALIDATED_MODEL_BASES.some((safe) =>
@@ -101,7 +118,8 @@ export function setAllowedModelBases(list: readonly string[] | null): void {
 
 /** Host-level semantic profile gate. Safe/balanced currently permit only models
  * whose provider path has passed the coding non-inferiority suite. Aggressive keeps
- * the explicit PXPIPE_MODELS scope for controlled experiments. */
+ * the explicit PXPIPE_MODELS scope for controlled experiments. `null` restores the
+ * Node env/default resolution. */
 export function setCompressionSafetyScope(scope: PxpipeSafetyScope | null): void {
   runtimeSafetyScope = scope;
 }
