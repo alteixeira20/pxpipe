@@ -1,0 +1,47 @@
+name: Apply Featherless resilience patch
+
+on:
+  push:
+    branches:
+      - fix/featherless-transform-resilience
+    paths:
+      - scripts/apply-featherless-resilience.mjs
+      - .github/workflows/apply-featherless-resilience.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-validate:
+    if: ${{ !contains(github.event.head_commit.message, '[applied]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/featherless-transform-resilience
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.21.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - run: node scripts/apply-featherless-resilience.mjs
+      - run: pnpm run typecheck
+      - run: pnpm test
+      - run: pnpm run build
+
+      - name: Commit validated patch
+        run: |
+          rm scripts/apply-featherless-resilience.mjs
+          rm .github/workflows/apply-featherless-resilience.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m "fix: harden Featherless transform fallback [applied]"
+          git push origin HEAD:fix/featherless-transform-resilience
