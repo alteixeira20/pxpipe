@@ -25,7 +25,7 @@ import {
   writeAgyCooldownForModel,
 } from './agy-quota.js';
 
-interface DoctorOptions {
+export interface AgyDoctorOptions {
   json: boolean;
   live: boolean;
   model?: string;
@@ -61,8 +61,20 @@ interface AgyDoctorReportV2 {
 }
 
 const DEFAULT_LIVE_TIMEOUT_MS = 60_000;
+const NON_MODEL_SUBCOMMANDS = new Set([
+  'agent',
+  'agents',
+  'changelog',
+  'help',
+  'install',
+  'models',
+  'plugin',
+  'plugins',
+  'update',
+  'version',
+]);
 
-function parseDoctorOptions(args: readonly string[]): DoctorOptions {
+export function parseAgyDoctorOptions(args: readonly string[]): AgyDoctorOptions {
   let json = false;
   let live = false;
   let model: string | undefined;
@@ -136,7 +148,7 @@ function safeHelp(binary: string): string {
   return result.status === 0 ? String(result.stdout ?? '') : '';
 }
 
-function failureWithCompoundReset(
+export function withAgyCompoundReset(
   failure: AgyFailure | null,
   stdout: string,
   stderr: string,
@@ -148,9 +160,9 @@ function failureWithCompoundReset(
 }
 
 async function runDoctor(args: readonly string[]): Promise<void> {
-  let options: DoctorOptions;
+  let options: AgyDoctorOptions;
   try {
-    options = parseDoctorOptions(args);
+    options = parseAgyDoctorOptions(args);
   } catch (error) {
     console.error(`[pxpipe] doctor agy: ${(error as Error).message}`);
     process.exitCode = 2;
@@ -217,7 +229,7 @@ async function runDoctor(args: readonly string[]): Promise<void> {
     });
     const stdout = String(result.stdout ?? '');
     const stderr = String(result.stderr ?? '');
-    const failure = failureWithCompoundReset(classifyAgyFailure({
+    const failure = withAgyCompoundReset(classifyAgyFailure({
       stdout,
       stderr,
       exitCode: result.status,
@@ -267,16 +279,22 @@ async function runDoctor(args: readonly string[]): Promise<void> {
   process.exitCode = report.ok ? 0 : 1;
 }
 
-function commandModel(argv: readonly string[]): string | undefined {
-  if (argv[0] === 'agy') return extractAgyModel(argv.slice(1));
+function commandArgs(argv: readonly string[]): readonly string[] {
+  if (argv[0] === 'agy') return argv.slice(1);
   if (isAgyWarpInvocation(argv)) {
     try {
-      return extractAgyModel(parseAgyWarpInvocation(argv).args);
+      return parseAgyWarpInvocation(argv).args;
     } catch {
-      return undefined;
+      return [];
     }
   }
-  return undefined;
+  return [];
+}
+
+export function isAgyNonModelInvocation(args: readonly string[]): boolean {
+  if (args.some((arg) => arg === '--help' || arg === '-h' || arg === '--version')) return true;
+  const first = args.find((arg) => !arg.startsWith('-'));
+  return first !== undefined && NON_MODEL_SUBCOMMANDS.has(first);
 }
 
 export async function runAgyEntryV2(argv: readonly string[]): Promise<void> {
@@ -287,14 +305,17 @@ export async function runAgyEntryV2(argv: readonly string[]): Promise<void> {
     return;
   }
 
-  const model = commandModel(argv);
-  const cooldown = readAgyCooldown(model);
-  if (cooldown) {
-    const remaining = Math.max(1, Math.ceil((cooldown.expiresAt - Date.now()) / 1_000));
-    console.error(
-      `[pxpipe] agy: ${cooldown.failure} for ${model ?? 'default model'}; retry after about ${remaining}s`,
-    );
-    process.exit(1);
+  const args = commandArgs(argv);
+  if (!isAgyNonModelInvocation(args)) {
+    const model = extractAgyModel(args);
+    const cooldown = readAgyCooldown(model);
+    if (cooldown) {
+      const remaining = Math.max(1, Math.ceil((cooldown.expiresAt - Date.now()) / 1_000));
+      console.error(
+        `[pxpipe] agy: ${cooldown.failure} for ${model ?? 'default model'}; retry after about ${remaining}s`,
+      );
+      process.exit(1);
+    }
   }
 
   await runAgyEntry(argv);
