@@ -37,6 +37,7 @@ import {
   type DashboardRoute,
 } from './dashboard.js';
 import { setPxpipeVersion } from './core/featherless.js';
+import { resolveCompressionProfile } from './core/safety-policy.js';
 
 /** Runtime config. The core transform tuning comes from DEFAULTS in
  *  transform.ts; startup knobs cover deployment plus emergency GPT scope
@@ -222,9 +223,9 @@ Usage:
                         base URL, e.g.
                           --route '127.0.0.1:8082/v1/*=http://127.0.0.1:47821'
 
-The proxy compresses eligible tools, schemas, reminders, tool_results,
-and history; tracks events to disk; and measures real saved_pct via
-/v1/messages/count_tokens. Dashboard controls can disable compression live.
+The proxy compresses eligible context according to a semantic safety profile,
+tracks events to disk, and measures real saved_pct via /v1/messages/count_tokens.
+Dashboard controls can disable compression live.
 
 Stats, sessions, and cleanup tools live in the dashboard at
   http://127.0.0.1:<port>/  (default port 47821)
@@ -263,6 +264,13 @@ Environment:
   PXPIPE_GATEWAY_BASE_URL gateway base URL (required with PXPIPE_PROVIDER
                           when provider is cloudflare-ai-gateway)
   PXPIPE_GATEWAY_HEADERS  extra upstream headers: JSON object or k=v;k2=v2
+  PXPIPE_PROFILE          semantic compression policy (default coding-safe):
+                            coding-safe — keep live tool state and tool docs native;
+                              Anthropic static authority stays native and only old
+                              closed history is image-compressed
+                            balanced — conservative low-risk bulk compression
+                            aggressive — legacy maximum-density behavior for A/B use
+                            passthrough — disable compression
   PXPIPE_MODELS           comma-separated model bases to image (Claude/Gemini/GPT/Grok);
                           default claude-fable-5,gemini-3.6-flash (Sol/Opus/GPT-5.5/Grok opt-in);
                           off disables
@@ -1120,6 +1128,8 @@ async function main(): Promise<void> {
   if (forcePassthrough) {
     console.log('[pxpipe] PXPIPE_DISABLE set — passthrough mode (compress=false), still logging usage + baselines');
   }
+  const compressionProfile = resolveCompressionProfile(process.env.PXPIPE_PROFILE);
+  console.log(`[pxpipe] compression profile → ${compressionProfile.name}: ${compressionProfile.description}`);
   // Subscription bearers expire. A client that froze its bearer at startup — a
   // container handed CLAUDE_CODE_OAUTH_TOKEN as an env var — cannot renew one,
   // so its max session length is the token's remaining life. When this is set we
@@ -1162,20 +1172,11 @@ async function main(): Promise<void> {
       imageDumpDir = undefined;
     }
   }
-  // Transform options pass through empty — the proxy uses the DEFAULTS
-  // baked into transform.ts. There are no behavior toggles: system slab,
-  // reminders, tool_results, and history compression all run
-  // unconditionally; the per-block break-even gate decides per-call
-  // whether to actually image each piece. The function-form `transform`
-  // below is ONLY a kill switch (PXPIPE_DISABLE / dashboard toggle →
-  // compress:false); on the active path it returns {}, so the gate always
-  // runs on static DEFAULTS — charsPerToken=4, priorWarm*=0 — which leaves
-  // the warm-baseline and anti-flapping burn terms inert. That is
-  // deliberate, NOT an oversight: there is no live-α feedback loop from
-  // the dashboard. Telemetry (2026-06, 897 sessions / 21,347 measured
-  // rows) showed 5 mode flips ever and losses at 0.8% of wins — all
-  // one-time cache-create amortization — so closing the loop would not
-  // change decisions. Re-run that reconciliation before wiring one in.
+  // The runtime now applies a semantic policy before the per-block profitability
+  // gates. The default coding-safe profile keeps live tool state and tool docs as
+  // native text and pushes Anthropic static authority below the slab threshold,
+  // while retaining old closed-history compression. Balanced/aggressive remain
+  // explicit operator choices for controlled workloads and A/B evaluation.
   const tracker: Tracker = new FileTracker(opts.eventsFile);
 
   // Sidecar dir for oversized 4xx request-body samples. Lives next to the
@@ -1212,20 +1213,11 @@ async function main(): Promise<void> {
     openAIModels: opts.openAIModels,
     cloudflareModels: opts.cloudflareModels,
     captureErrorReqBody: opts.captureErrorReqBody,
-    // Per-request transform options:
-    //   1. Runtime kill switch — when the dashboard "passthrough" toggle
-    //      is off, force compress=false so /v1/messages forwards
-    //      untransformed. Lets the operator instantly disable the proxy
-    //      when upstream is unhealthy without restarting.
-    //   2. Otherwise use DEFAULTS in transform.ts for break-even gating.
+    // Per-request transform options: dashboard/PXPIPE_DISABLE remain hard kill
+    // switches; otherwise the selected semantic safety profile is applied.
     transform: () => {
-      // A/B harness: PXPIPE_DISABLE=1 forces passthrough (compress=false) for the
-      // whole process, so the "normal" arm can be scripted on its own port while
-      // still logging real usage + count_tokens baselines to its own PXPIPE_LOG.
-      // (The dashboard kill switch does the same thing at runtime.)
       if (forcePassthrough || !dashboard.getCompressionEnabled()) return { compress: false };
-      // Active path: use DEFAULTS in transform.ts for break-even gating.
-      return {};
+      return { ...compressionProfile.transform };
     },
     onRequest: async (e) => {
       // Feed the dashboard BEFORE tracker.emit — toTrackEvent strips
