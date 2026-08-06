@@ -87,10 +87,20 @@ function rewriteProviderRequest(request: Request, route: ParsedProviderRoute): R
   const sourceUrl = new URL(request.url);
   sourceUrl.pathname = route.upstreamPath;
 
-  // Request construction clones method, headers, body, duplex semantics and
-  // abort signal without consuming or decoding the payload. Tool schemas,
-  // prompts, binary parts and structured-output contracts remain untouched.
-  return new Request(sourceUrl, request);
+  const bodyAllowed = request.method !== 'GET' && request.method !== 'HEAD';
+  const init: RequestInit & { duplex?: 'half' } = {
+    method: request.method,
+    headers: new Headers(request.headers),
+    body: bodyAllowed ? request.body : undefined,
+    redirect: request.redirect,
+    signal: request.signal,
+  };
+  if (request.body) init.duplex = 'half';
+
+  // The body stream is forwarded without decoding or re-encoding it. Tool
+  // schemas, prompts, binary parts and structured-output contracts remain
+  // untouched until the selected provider's normal transform pipeline runs.
+  return new Request(sourceUrl, init);
 }
 
 /**
