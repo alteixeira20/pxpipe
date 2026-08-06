@@ -6,12 +6,17 @@ on:
       - 'reliability/**'
     paths:
       - '.github/agent-patches/*.patch'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - '.github/agent-patches/*.patch'
 
 permissions:
   contents: write
 
 concurrency:
-  group: agent-patch-${{ github.ref }}
+  group: agent-patch-${{ github.event.pull_request.head.ref || github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -22,7 +27,7 @@ jobs:
       - name: Checkout branch
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.ref_name }}
+          ref: ${{ github.event.pull_request.head.ref || github.ref_name }}
           fetch-depth: 0
 
       - name: Locate patch
@@ -70,6 +75,8 @@ jobs:
 
       - name: Commit validated changes
         shell: bash
+        env:
+          TARGET_BRANCH: ${{ github.event.pull_request.head.ref || github.ref_name }}
         run: |
           set -euo pipefail
           git config user.name "pxpipe-reliability-bot"
@@ -80,4 +87,4 @@ jobs:
             exit 1
           fi
           git commit -m "fix(reliability): enforce coding-safe compression policy"
-          git push origin "HEAD:${{ github.ref_name }}"
+          git push origin "HEAD:${TARGET_BRANCH}"
