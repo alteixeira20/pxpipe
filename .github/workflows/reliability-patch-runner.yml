@@ -1,0 +1,73 @@
+name: Reliability patch runner
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: write
+
+jobs:
+  apply-validate-commit:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      startsWith(github.event.pull_request.head.ref, 'reliability/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout controlled PR branch
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Locate and apply staged patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t patches < <(find .github/agent-patches -maxdepth 1 -type f -name '*.patch' -print | sort)
+          if [ "${#patches[@]}" -ne 1 ]; then
+            echo "expected exactly one staged patch, found ${#patches[@]}" >&2
+            exit 1
+          fi
+          git apply --check --whitespace=error-all "${patches[0]}"
+          git apply --whitespace=error-all "${patches[0]}"
+          rm -rf .github/agent-patches
+          rm -f .github/workflows/agent-apply-patch.yml
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Enable pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.21.0 --activate
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Commit validated source changes
+        shell: bash
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+          git config user.name "pxpipe-reliability-bot"
+          git config user.email "pxpipe-reliability-bot@users.noreply.github.com"
+          git add -A
+          git commit -m "fix(reliability): apply validated coding-safe policy"
+          git push origin "HEAD:${HEAD_REF}"
