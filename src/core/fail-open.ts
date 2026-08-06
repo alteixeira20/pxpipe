@@ -10,8 +10,8 @@ type ProxyRequest = Parameters<ReturnType<typeof createProxy>>[0];
  * Node's Web Request is the unparameterized form. createProxy intentionally uses
  * only standard Request fields, so normalize the structurally compatible value at
  * this single boundary instead of leaking runtime-specific generics through the API. */
-function asProxyRequest(request: Request): ProxyRequest {
-  return request as unknown as ProxyRequest;
+function asProxyRequest(request: unknown): ProxyRequest {
+  return request as ProxyRequest;
 }
 
 /** Only request shapes whose body the transform pipeline may consume need a retry
