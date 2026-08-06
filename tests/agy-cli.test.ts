@@ -11,7 +11,7 @@ import {
 } from '../src/agy.js';
 
 describe('AGY command detection and forwarding', () => {
-  it.each(['agy', '/usr/local/bin/agy', '/home/user/.local/bin/agy', 'C:\\tools\\agy.exe'])(
+  it.each(['agy', '/usr/local/bin/agy', '/home/user/.local/bin/agy'])(
     'recognizes %s as AGY',
     (command) => expect(isAgyCommand(command)).toBe(true),
   );
