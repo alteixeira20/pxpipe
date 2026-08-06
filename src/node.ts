@@ -14,7 +14,8 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { isIP } from 'node:net';
 import { spawnSync } from 'node:child_process';
-import { createProxy, parseGatewayHeaders, resolveUpstreams, type ProxyConfig } from './core/proxy.js';
+import { parseGatewayHeaders, resolveUpstreams, type ProxyConfig } from './core/proxy.js';
+import { createFailOpenProxy } from './core/fail-open.js';
 import {
   chatCompletionsUrl,
 } from './core/messages-chat-bridge.js';
@@ -268,11 +269,13 @@ Environment:
                             coding-safe — keep live tool state and tool docs native;
                               Anthropic static authority stays native and only old
                               closed history is image-compressed
-                            balanced — conservative low-risk bulk compression
-                            aggressive — legacy maximum-density behavior for A/B use
+                            balanced — same safety boundaries with a shorter protected
+                              history tail for more archival compression
+                            aggressive — legacy lossy maximum-density behavior; A/B only
                             passthrough — disable compression
   PXPIPE_MODELS           comma-separated model bases to image (Claude/Gemini/GPT/Grok);
-                          default claude-fable-5,gemini-3.6-flash (Sol/Opus/GPT-5.5/Grok opt-in);
+                          default claude-fable-5 only; other families are explicit opt-in
+                          until their provider-specific coding-safe path is validated;
                           off disables
   PXPIPE_CONFIG           JSON config path (default ~/.config/pxpipe/config.json)
                           supports {"models": [...]} or {"models": "off"}
@@ -1130,6 +1133,9 @@ async function main(): Promise<void> {
   }
   const compressionProfile = resolveCompressionProfile(process.env.PXPIPE_PROFILE);
   console.log(`[pxpipe] compression profile → ${compressionProfile.name}: ${compressionProfile.description}`);
+  if (compressionProfile.name === 'aggressive') {
+    console.warn('[pxpipe] aggressive profile is intentionally lossy and is intended for controlled A/B evaluation, not default coding work');
+  }
   // Subscription bearers expire. A client that froze its bearer at startup — a
   // container handed CLAUDE_CODE_OAUTH_TOKEN as an env var — cannot renew one,
   // so its max session length is the token's remaining life. When this is set we
@@ -1301,7 +1307,7 @@ async function main(): Promise<void> {
       tracker.emit(toTrackEvent(e));
     },
   };
-  const handle = createProxy(config);
+  const handle = createFailOpenProxy(config);
 
   const server = createServer((req, res) => {
     Promise.resolve()
