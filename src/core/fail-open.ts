@@ -1,8 +1,30 @@
-import { createProxy, type ProxyConfig } from './proxy.js';
+import { createProxy, type ProxyConfig, type ProxyEvent } from './proxy.js';
 
 const TRANSFORM_FAILURE_STATUS = 502;
 const TRANSFORM_FAILURE_MARKER = 'pxpipe transform failed';
 const SNIFF_LIMIT = 4 * 1024;
+
+/** Only request shapes whose body the transform pipeline may consume need a retry
+ * clone. Avoid teeing uploads/audio/arbitrary passthrough streams: a fail-open guard
+ * must not become a hidden buffering tax on traffic it can never transform. */
+export function mayTransformRequest(request: Request): boolean {
+  if (request.method.toUpperCase() !== 'POST') return false;
+  const path = new URL(request.url).pathname;
+  if (
+    path === '/v1/messages'
+    || path === '/anthropic/v1/messages'
+    || path === '/anthropic/messages'
+  ) return true;
+  if (/(?:\/v1)?\/(?:chat\/completions|responses)$/.test(path)) return true;
+  if (/:(?:generateContent|streamGenerateContent)$/.test(path)) return true;
+  return false;
+}
+
+function isTransformFailureEvent(event: ProxyEvent): boolean {
+  return event.status === TRANSFORM_FAILURE_STATUS
+    && typeof event.error === 'string'
+    && event.error.startsWith('transform_error:');
+}
 
 /**
  * True only for pxpipe's own pre-upstream transform failure response.
@@ -30,19 +52,34 @@ export async function isPxpipeTransformFailure(response: Response): Promise<bool
  * failures. The retry still uses createProxy, so provider routing, auth rotation,
  * Messages→Responses/Chat bridging, timeouts, duplicate protection and telemetry
  * remain identical; only `compress:false` changes.
+ *
+ * The primary proxy's synthetic transform-error event is suppressed because it never
+ * reached an upstream and the caller ultimately sees the fallback result. This keeps
+ * dashboards at one row per real request instead of reporting a phantom 502 followed
+ * by a success. A fallback failure is still reported normally.
  */
 export function createFailOpenProxy(
   config: ProxyConfig,
 ): ((request: Request) => Promise<Response>) {
-  const primary = createProxy(config);
+  const observer = config.onRequest;
+  const primary = createProxy({
+    ...config,
+    onRequest: observer
+      ? async (event) => {
+          if (!isTransformFailureEvent(event)) await observer(event);
+        }
+      : undefined,
+  });
   const fallback = createProxy({
     ...config,
     transform: { compress: false },
   });
 
   return async (request: Request): Promise<Response> => {
-    // Clone before the primary consumes a streamed POST body. A clone is only read
-    // if the primary returns the exact pre-upstream transform failure marker.
+    if (!mayTransformRequest(request)) return primary(request);
+
+    // Clone only a model-request shape and before the primary consumes the stream.
+    // The clone is read only if the primary returns the exact pre-upstream marker.
     const retryRequest = request.clone();
     const response = await primary(request);
     if (!(await isPxpipeTransformFailure(response))) return response;
