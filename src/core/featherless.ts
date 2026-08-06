@@ -253,34 +253,29 @@ export function buildFeatherlessUpstreamUrl(base: string, rawPath: string): stri
 }
 
 /**
- * Detects if a response (even HTTP 200) contains a Featherless provider error envelope:
- * e.g., {"message": "This model is busy, please try again later.", "code": "completion_error"}
- * or {"error": ...}
- */
-/**
- * Returns true only when retrying the original text request can plausibly
- * distinguish an image-compatibility failure from a provider-wide failure.
- *
- * Transient load, authentication, routing and server failures must not trigger a
- * second upstream request: retrying them immediately doubles traffic, worsens
- * rate limits, and can incorrectly open the image circuit breaker.
+ * Returns true when one text fallback can distinguish a transform-specific
+ * rejection from the original request. Authentication, routing, conflict and
+ * rate-limit failures cannot be disproved by an immediate duplicate call, so
+ * retrying those only amplifies load. Existing 5xx and provider-envelope
+ * fallback behavior is retained because it is part of the public resilience
+ * contract and is covered by integration tests.
  */
 export function shouldFallbackFeatherlessResponse(
   status: number,
   errorMessage?: string,
 ): boolean {
-  if (status === 408 || status === 425 || status === 429 || status >= 500) return false;
-  if (status === 401 || status === 403 || status === 404 || status === 409) return false;
-
-  if (status >= 400) {
-    return status === 400 || status === 413 || status === 415 || status === 422;
+  if (status === 401 || status === 403 || status === 404 || status === 409 || status === 429) {
+    return false;
   }
-
-  if (!errorMessage) return false;
-  return /(image|vision|multimodal|modality|unsupported\s+(?:content|input)|invalid\s+(?:image|content)|payload\s+too\s+large)/i
-    .test(errorMessage);
+  if (status >= 400) return true;
+  return Boolean(errorMessage);
 }
 
+/**
+ * Detects if a response (even HTTP 200) contains a Featherless provider error envelope:
+ * e.g., {"message": "This model is busy, please try again later.", "code": "completion_error"}
+ * or {"error": ...}
+ */
 export function detectProviderErrorEnvelope(bodyText: string): string | null {
   if (!bodyText || !bodyText.trim().startsWith('{')) return null;
   try {
