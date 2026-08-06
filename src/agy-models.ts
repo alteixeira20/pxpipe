@@ -216,11 +216,12 @@ function runAgy(
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   if (result.error) {
-    throw new Error(`cannot execute AGY: ${result.error.message}`);
+    throw new Error(`cannot execute AGY ${args.join(' ')} (${result.error.name})`);
   }
   if (result.status !== 0) {
-    const stderr = String(result.stderr ?? '').trim();
-    throw new Error(`AGY ${args.join(' ')} exited ${result.status}${stderr ? `: ${stderr}` : ''}`);
+    // AGY stderr may contain account identities, project names or provider
+    // details. Discovery diagnostics retain only the safe command and status.
+    throw new Error(`AGY ${args.join(' ')} exited ${result.status}`);
   }
   return String(result.stdout ?? '').trim();
 }
