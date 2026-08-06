@@ -42,6 +42,7 @@ export {
 } from './safety-policy.js';
 export { transformOpenAIChatCompletions, transformOpenAIResponses, resolveVisionCost, openAIVisionTokens } from './openai.js';
 export { createProxy, type ProxyConfig, type ProxyEvent } from './proxy.js';
+export { createFailOpenProxy, isPxpipeTransformFailure } from './fail-open.js';
 export {
   assertProviderId,
   createProviderRouter,
