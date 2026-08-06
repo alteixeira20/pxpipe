@@ -145,6 +145,22 @@ export function shouldStopForFailure(
   return SYSTEMIC.has(failure.kind) && stopOn.has('systemic');
 }
 
+function expectsStructuredOutput(args: readonly string[]): boolean {
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (arg === '--json-schema' || arg.startsWith('--json-schema=')) return true;
+    if (arg.startsWith('--output-format=')) {
+      const value = arg.slice('--output-format='.length);
+      if (value === 'json' || value === 'stream-json') return true;
+    }
+    if (arg === '--output-format') {
+      const value = args[index + 1];
+      if (value === 'json' || value === 'stream-json') return true;
+    }
+  }
+  return false;
+}
+
 class BoundedCapture {
   private chunks: Buffer[] = [];
   private size = 0;
@@ -235,8 +251,8 @@ async function executeCall(input: {
   input.signal.addEventListener('abort', onAbort, { once: true });
 
   const { code, signal } = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
-    child.on('error', () => resolve({ code: 127, signal: null }));
-    child.on('exit', (code, signal) => resolve({ code, signal }));
+    child.once('error', () => resolve({ code: 127, signal: null }));
+    child.once('exit', (code, signal) => resolve({ code, signal }));
   });
   clearTimeout(timeout);
   input.signal.removeEventListener('abort', onAbort);
@@ -248,7 +264,7 @@ async function executeCall(input: {
         stderr: stderr.text(),
         exitCode: code,
         timedOut,
-        structuredExpected: input.args.some((arg) => arg === 'json' || arg === 'stream-json'),
+        structuredExpected: expectsStructuredOutput(input.args),
       });
   if (failure) writeAgyCooldown(failure);
 
@@ -355,10 +371,16 @@ Limits:
 `);
 }
 
+async function readStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
+
 async function readPrompts(inputFile?: string): Promise<string[]> {
-  const text = inputFile
-    ? await readFile(inputFile, 'utf8')
-    : await new Response(process.stdin as unknown as BodyInit).text();
+  const text = inputFile ? await readFile(inputFile, 'utf8') : await readStdin();
   return text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
 }
 
