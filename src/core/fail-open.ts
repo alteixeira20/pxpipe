@@ -37,6 +37,46 @@ function isTransformFailureEvent(event: ProxyEvent): boolean {
 }
 
 /**
+ * Node's CLI historically parsed PXPIPE_FEATHERLESS_TRANSFORM but did not pass the
+ * result into ProxyConfig, which left provider mode at its implicit `auto` default.
+ * That also let Featherless bypass the safe model allow-list when PXPIPE_MODELS was
+ * unset. Resolve the missing runtime value here, at the common Node/Worker host
+ * wrapper, and fail closed for safe profiles.
+ *
+ * Explicit ProxyConfig always wins. Otherwise safe/balanced/passthrough disable the
+ * unvalidated Featherless image path. `aggressive` may use the legacy env mode (or
+ * proxy's `auto` default) for controlled A/B evaluation.
+ */
+export function resolveHostedFeatherlessMode(
+  config: ProxyConfig,
+): ProxyConfig['featherlessTransformMode'] {
+  if (config.featherlessTransformMode !== undefined) return config.featherlessTransformMode;
+
+  if (typeof process !== 'undefined') {
+    const profile = (process.env?.PXPIPE_PROFILE ?? '').trim().toLowerCase();
+    const aggressive = profile === 'aggressive' || profile === 'legacy';
+    if (!aggressive) return 'off';
+
+    const requested = (process.env?.PXPIPE_FEATHERLESS_TRANSFORM ?? '').trim().toLowerCase();
+    if (requested === 'off' || requested === 'auto' || requested === 'force') return requested;
+    return undefined;
+  }
+
+  // Worker/browser hosts have no process.env. The built-in safe profiles carry
+  // this unmistakable non-destructive shape. Custom hosts that want Featherless
+  // transformation should set featherlessTransformMode explicitly.
+  const transform = typeof config.transform === 'object' ? config.transform : undefined;
+  if (
+    transform?.compressTools === false
+    && transform.compressToolResults === false
+    && transform.minCompressChars === Number.MAX_SAFE_INTEGER
+  ) {
+    return 'off';
+  }
+  return undefined;
+}
+
+/**
  * True only for pxpipe's own pre-upstream transform failure response.
  *
  * Upstream 502s, bridge validation 400s, timeouts and transport failures are not
@@ -72,8 +112,13 @@ export function createFailOpenProxy(
   config: ProxyConfig,
 ): ((request: Request) => Promise<Response>) {
   const observer = config.onRequest;
-  const primary = createProxy({
+  const featherlessTransformMode = resolveHostedFeatherlessMode(config);
+  const hostedConfig: ProxyConfig = {
     ...config,
+    ...(featherlessTransformMode !== undefined ? { featherlessTransformMode } : {}),
+  };
+  const primary = createProxy({
+    ...hostedConfig,
     onRequest: observer
       ? async (event) => {
           if (!isTransformFailureEvent(event)) await observer(event);
@@ -81,8 +126,9 @@ export function createFailOpenProxy(
       : undefined,
   });
   const fallback = createProxy({
-    ...config,
+    ...hostedConfig,
     transform: { compress: false },
+    featherlessTransformMode: 'off',
   });
 
   return async (request: Request): Promise<Response> => {
