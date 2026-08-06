@@ -8,11 +8,18 @@ const agyDispatch =
   argv[0] === 'agy'
   || (argv[0] === 'doctor' && argv[1] === 'agy')
   || (argv[0] === 'warp' && isAgyWord(warpCommand));
+const batchDispatch = argv[0] === 'agy-batch';
 
-const entry = agyDispatch ? '../dist/agy.js' : '../dist/node.js';
+const entry = batchDispatch
+  ? '../dist/agy-execution.js'
+  : agyDispatch
+    ? '../dist/agy.js'
+    : '../dist/node.js';
+
 import(entry)
   .then(async (module) => {
-    if (agyDispatch) await module.runAgyEntry(argv);
+    if (batchDispatch) await module.runAgyBatchEntry(argv.slice(1));
+    else if (agyDispatch) await module.runAgyEntry(argv);
   })
   .catch((err) => {
     console.error('[pxpipe] failed to start:', err);
