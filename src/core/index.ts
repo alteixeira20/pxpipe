@@ -25,6 +25,7 @@ export {
   type RenderTextToImagesOptions,
   type RenderedTextImage,
   type RenderTextToImagesResult,
+  type CompressionProfileName,
 } from './library.js';
 export {
   transformRequest,
@@ -33,6 +34,12 @@ export {
   type KeepSharpBlock,
   type RecoverableBlock,
 } from './transform.js';
+export {
+  mergeCompressionProfileOptions,
+  resolveCompressionProfile,
+  shouldKeepToolResultSharp,
+  type CompressionProfile,
+} from './safety-policy.js';
 export { transformOpenAIChatCompletions, transformOpenAIResponses, resolveVisionCost, openAIVisionTokens } from './openai.js';
 export { createProxy, type ProxyConfig, type ProxyEvent } from './proxy.js';
 export {
