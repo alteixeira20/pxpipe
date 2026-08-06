@@ -114,7 +114,7 @@ describe('AGY executable discovery', () => {
     const cachePath = join(directory, 'cache', 'agy-models.json');
     const callsPath = join(directory, 'calls.log');
 
-    writeFileSync(binary, `#!/usr/bin/env bash
+    writeFileSync(binary, `#!/bin/bash
 set -eu
 printf '%s\\n' "$1" >> "$AGY_FAKE_CALLS"
 case "$1" in
@@ -183,7 +183,7 @@ esac
     const directory = temporaryDirectory();
     const binary = join(directory, 'agy');
 
-    writeFileSync(binary, `#!/usr/bin/env bash
+    writeFileSync(binary, `#!/bin/bash
 if [[ "$1" == '--version' ]]; then
   printf '%s\\n' 'secret-account@example.test' >&2
   exit 9
