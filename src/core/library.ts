@@ -18,8 +18,13 @@ import {
   type RecoverableBlock,
 } from './transform.js';
 import { resolveGptProfile } from './gpt-model-profiles.js';
+import {
+  mergeCompressionProfileOptions,
+  resolveCompressionProfile,
+  type CompressionProfileName,
+} from './safety-policy.js';
 
-export type { KeepSharpBlock, RecoverableBlock };
+export type { KeepSharpBlock, RecoverableBlock, CompressionProfileName };
 
 export type BytesLike = Uint8Array | ArrayBuffer | ArrayBufferView;
 
@@ -30,6 +35,8 @@ export interface PxpipeOptions
   > {
   /** Test/debug-only bypass. Product hosts should prefer their dashboard setting. */
   readonly compress?: boolean;
+  /** Semantic compression policy. Defaults to `coding-safe`. */
+  readonly profile?: CompressionProfileName;
 }
 
 export interface PxpipeTransformInput {
@@ -99,7 +106,8 @@ function classifyReason(info: TransformInfo): PxpipeReason {
 
 /**
  * Library wrapper for the Anthropic Messages transformer: model gate, machine-readable
- * reasons, and cache_control ownership flag (prevents hosts stacking a second injector).
+ * reasons, semantic safety policy, and cache_control ownership flag (prevents hosts
+ * stacking a second injector).
  */
 export async function transformAnthropicMessages(
   input: PxpipeTransformInput,
@@ -117,7 +125,13 @@ export async function transformAnthropicMessages(
   }
 
   try {
-    const { body, info } = await transformRequest(original, { ...input.options, model: input.model ?? undefined });
+    const { profile: requestedProfile, ...overrides } = input.options ?? {};
+    const profile = resolveCompressionProfile(requestedProfile);
+    const options = mergeCompressionProfileOptions(profile, overrides);
+    const { body, info } = await transformRequest(original, {
+      ...options,
+      model: input.model ?? undefined,
+    });
     const reason = classifyReason(info);
     const markerCount = countCacheControlMarkers(body);
     return {
