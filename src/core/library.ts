@@ -1,4 +1,4 @@
-import { isPxpipeSupportedModel } from './applicability.js';
+import { isPxpipeSupportedModelForScope } from './applicability.js';
 import { countCacheControlMarkers } from './measurement.js';
 import {
   renderTextToPngsWithCharLimit,
@@ -105,28 +105,29 @@ function classifyReason(info: TransformInfo): PxpipeReason {
 }
 
 /**
- * Library wrapper for the Anthropic Messages transformer: model gate, machine-readable
- * reasons, semantic safety policy, and cache_control ownership flag (prevents hosts
- * stacking a second injector).
+ * Library wrapper for the Anthropic Messages transformer: profile-local model gate,
+ * machine-readable reasons, semantic safety policy, and cache_control ownership flag
+ * (prevents hosts stacking a second injector).
  */
 export async function transformAnthropicMessages(
   input: PxpipeTransformInput,
 ): Promise<PxpipeTransformResult> {
   const original = toUint8Array(input.body);
-  if (!isPxpipeSupportedModel(input.model)) {
-    return {
-      body: original,
-      applied: false,
-      reason: 'unsupported_model',
-      detail: input.model ?? undefined,
-      info: emptyInfo('unsupported_model'),
-      cache: { ownsCacheControl: false, markerCount: countCacheControlMarkers(original) },
-    };
-  }
 
   try {
     const { profile: requestedProfile, ...overrides } = input.options ?? {};
     const profile = resolveCompressionProfile(requestedProfile);
+    if (!isPxpipeSupportedModelForScope(input.model, profile.name)) {
+      return {
+        body: original,
+        applied: false,
+        reason: 'unsupported_model',
+        detail: input.model ?? undefined,
+        info: emptyInfo('unsupported_model'),
+        cache: { ownsCacheControl: false, markerCount: countCacheControlMarkers(original) },
+      };
+    }
+
     const options = mergeCompressionProfileOptions(profile, overrides);
     const { body, info } = await transformRequest(original, {
       ...options,
