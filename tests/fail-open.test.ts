@@ -1,9 +1,20 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createFailOpenProxy,
   isPxpipeTransformFailure,
   mayTransformRequest,
+  resolveHostedFeatherlessMode,
 } from '../src/core/fail-open.js';
+
+const originalProfile = process.env.PXPIPE_PROFILE;
+const originalFeatherlessMode = process.env.PXPIPE_FEATHERLESS_TRANSFORM;
+
+afterEach(() => {
+  if (originalProfile === undefined) delete process.env.PXPIPE_PROFILE;
+  else process.env.PXPIPE_PROFILE = originalProfile;
+  if (originalFeatherlessMode === undefined) delete process.env.PXPIPE_FEATHERLESS_TRANSFORM;
+  else process.env.PXPIPE_FEATHERLESS_TRANSFORM = originalFeatherlessMode;
+});
 
 describe('transform-only fail-open classifier', () => {
   it('recognizes the exact pre-upstream transform failure response', async () => {
@@ -37,6 +48,36 @@ describe('transform-only fail-open classifier', () => {
       detail: 'pxpipe transform failed',
     }), { status: 502 });
     expect(await isPxpipeTransformFailure(response)).toBe(false);
+  });
+});
+
+describe('hosted Featherless safety mode', () => {
+  it('disables implicit Featherless imaging under the default safe profile', () => {
+    delete process.env.PXPIPE_PROFILE;
+    delete process.env.PXPIPE_FEATHERLESS_TRANSFORM;
+    expect(resolveHostedFeatherlessMode({ provider: 'featherless' })).toBe('off');
+  });
+
+  it('disables implicit Featherless imaging under balanced and passthrough', () => {
+    for (const profile of ['balanced', 'passthrough']) {
+      process.env.PXPIPE_PROFILE = profile;
+      delete process.env.PXPIPE_FEATHERLESS_TRANSFORM;
+      expect(resolveHostedFeatherlessMode({ provider: 'featherless' })).toBe('off');
+    }
+  });
+
+  it('honors the legacy Featherless env mode only under explicit aggressive profile', () => {
+    process.env.PXPIPE_PROFILE = 'aggressive';
+    process.env.PXPIPE_FEATHERLESS_TRANSFORM = 'force';
+    expect(resolveHostedFeatherlessMode({ provider: 'featherless' })).toBe('force');
+  });
+
+  it('lets an explicit ProxyConfig mode override host-profile inference', () => {
+    process.env.PXPIPE_PROFILE = 'coding-safe';
+    expect(resolveHostedFeatherlessMode({
+      provider: 'featherless',
+      featherlessTransformMode: 'force',
+    })).toBe('force');
   });
 });
 
