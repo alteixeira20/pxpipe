@@ -14,9 +14,6 @@ const OUT = 'dist';
 if (existsSync(OUT)) await rm(OUT, { recursive: true, force: true });
 await mkdir(OUT, { recursive: true });
 
-// Run tsc's JS entry directly with the current Node binary rather than via
-// pnpm. This avoids Windows launcher/escaping differences and keeps the build
-// independent from the command used to invoke it.
 const tscBin = require.resolve('typescript/bin/tsc');
 const tsc = spawnSync(process.execPath, [tscBin, '-p', 'tsconfig.json'], {
   stdio: 'inherit',
@@ -51,9 +48,14 @@ await build({
   outfile: 'dist/agy.js',
 });
 
-console.log('✓ built dist/node.js + dist/agy.js');
+await build({
+  ...sharedBuild,
+  entryPoints: ['src/agy-execution.ts'],
+  outfile: 'dist/agy-execution.js',
+});
 
-// Smoke checks pin the shipped entrypoints rather than source-only behavior.
+console.log('✓ built dist/node.js + dist/agy.js + dist/agy-execution.js');
+
 const versionSmoke = spawnSync(process.execPath, ['dist/node.js', '--version'], { encoding: 'utf8' });
 const printedVersion = (versionSmoke.stdout ?? '').trim();
 if (versionSmoke.status !== 0 || printedVersion !== pkg.version) {
@@ -64,15 +66,21 @@ if (versionSmoke.status !== 0 || printedVersion !== pkg.version) {
   process.exit(1);
 }
 
-const agySmoke = spawnSync(process.execPath, [
-  '--input-type=module',
-  '--eval',
-  "import('./dist/agy.js').then((m) => { if (typeof m.runAgyEntry !== 'function') process.exit(1); })",
-], { encoding: 'utf8' });
-if (agySmoke.status !== 0) {
-  console.error(`✗ AGY entrypoint smoke check failed (exit ${agySmoke.status})`);
-  process.exit(1);
+const exportSmokes = [
+  ['dist/agy.js', 'runAgyEntry'],
+  ['dist/agy-execution.js', 'runAgyBatchEntry'],
+];
+for (const [file, exported] of exportSmokes) {
+  const smoke = spawnSync(process.execPath, [
+    '--input-type=module',
+    '--eval',
+    `import('./${file}').then((m) => { if (typeof m.${exported} !== 'function') process.exit(1); })`,
+  ], { encoding: 'utf8' });
+  if (smoke.status !== 0) {
+    console.error(`✗ ${file} smoke check failed (exit ${smoke.status})`);
+    process.exit(1);
+  }
 }
 
 console.log(`✓ version smoke check: --version prints ${pkg.version}`);
-console.log('✓ AGY smoke check: runAgyEntry exported');
+console.log('✓ AGY smoke checks: command entrypoints exported');
