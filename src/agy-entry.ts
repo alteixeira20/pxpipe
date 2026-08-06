@@ -143,9 +143,10 @@ function safeHelp(binary: string): string {
     encoding: 'utf8',
     timeout: 5_000,
     env: buildAgyEnvironment(process.env),
-    stdio: ['ignore', 'pipe', 'ignore'],
+    stdio: ['ignore', 'pipe', 'pipe'],
   });
-  return result.status === 0 ? String(result.stdout ?? '') : '';
+  if (result.status !== 0) return '';
+  return `${String(result.stdout ?? '')}\n${String(result.stderr ?? '')}`;
 }
 
 export function withAgyCompoundReset(

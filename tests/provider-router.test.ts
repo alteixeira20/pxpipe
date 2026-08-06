@@ -126,10 +126,20 @@ describe('single-listener provider router', () => {
       authorization: 'Bearer provider-key',
     });
     expect(JSON.parse(featherlessCalls[0]!.body)).toEqual(payload);
-    expect(observed).toEqual([
-      'provider:featherless',
-      'router:featherless:featherless',
-    ]);
+
+    // Request telemetry is finalized when the streamed upstream response
+    // reaches EOF. Consume the body before asserting completion observers.
+    expect(await response.json()).toEqual({
+      url: 'https://api.featherless.example/v1/chat/completions?trace=one',
+      body: JSON.stringify(payload),
+    });
+
+    await vi.waitFor(() => {
+      expect(observed).toEqual([
+        'provider:featherless',
+        'router:featherless:featherless',
+      ]);
+    });
   });
 
   it('keeps legacy unprefixed routes on the default proxy', async () => {
