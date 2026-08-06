@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isPxpipeTransformFailure } from '../src/core/fail-open.js';
+import { isPxpipeTransformFailure, mayTransformRequest } from '../src/core/fail-open.js';
 
 describe('transform-only fail-open classifier', () => {
   it('recognizes the exact pre-upstream transform failure response', async () => {
@@ -33,5 +33,27 @@ describe('transform-only fail-open classifier', () => {
       detail: 'pxpipe transform failed',
     }), { status: 502 });
     expect(await isPxpipeTransformFailure(response)).toBe(false);
+  });
+});
+
+describe('fail-open retry body cloning scope', () => {
+  it.each([
+    ['https://local/v1/messages'],
+    ['https://local/anthropic/messages'],
+    ['https://local/v1/chat/completions'],
+    ['https://local/v1/responses'],
+    ['https://local/v1beta/models/gemini-3.6-flash:generateContent'],
+    ['https://local/v1beta/models/gemini-3.6-flash:streamGenerateContent'],
+  ])('recognizes a transformable POST route: %s', (url) => {
+    expect(mayTransformRequest(new Request(url, { method: 'POST' }))).toBe(true);
+  });
+
+  it.each([
+    ['GET', 'https://local/v1/messages'],
+    ['POST', 'https://local/v1/audio/transcriptions'],
+    ['POST', 'https://local/files'],
+    ['POST', 'https://local/v1/models'],
+  ])('does not clone passthrough traffic: %s %s', (method, url) => {
+    expect(mayTransformRequest(new Request(url, { method }))).toBe(false);
   });
 });
