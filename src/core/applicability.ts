@@ -83,8 +83,7 @@ function modelBaseMatches(id: string, candidate: string): boolean {
   return id === target || id.startsWith(`${target}-`);
 }
 
-function safetyAllowsConfiguredBase(candidate: string): boolean {
-  const scope = activeSafetyScope();
+function safetyAllowsConfiguredBase(candidate: string, scope: PxpipeSafetyScope): boolean {
   if (scope === 'passthrough') return false;
   if (scope !== 'coding-safe' && scope !== 'balanced') return true;
   const base = baseModelId(candidate).toLowerCase();
@@ -95,9 +94,16 @@ function safetyAllowsConfiguredBase(candidate: string): boolean {
   );
 }
 
+function configuredModelBases(): string[] {
+  return runtimeModelBases !== null ? [...runtimeModelBases] : envOrDefaultBases();
+}
+
+function allowedModelBasesForScope(scope: PxpipeSafetyScope): string[] {
+  return configuredModelBases().filter((candidate) => safetyAllowsConfiguredBase(candidate, scope));
+}
+
 function allowedModelBases(): string[] {
-  const configured = runtimeModelBases !== null ? [...runtimeModelBases] : envOrDefaultBases();
-  return configured.filter(safetyAllowsConfiguredBase);
+  return allowedModelBasesForScope(activeSafetyScope());
 }
 
 /** Current effective allowed-model scope after semantic safety filtering. */
@@ -137,31 +143,42 @@ function unqualifiedModelId(base: string): string | null {
   return slash >= 0 ? base.slice(slash + 1) : null;
 }
 
-/** Membership test against the effective allowed scope. Matches exact base or
- * `-suffix` alias; [variant] tags stripped first. */
-function isAllowed(model: string | null | undefined): boolean {
+/** Membership test against a caller-selected safety scope. Pure with respect to
+ * profile selection, so public library calls can choose a profile without mutating
+ * process-global host state or racing another concurrent transform. */
+function isAllowedForScope(
+  model: string | null | undefined,
+  scope: PxpipeSafetyScope,
+): boolean {
   if (typeof model !== 'string') return false;
   const base = baseModelId(model).toLowerCase();
   // Never compress an id that would be priced with another provider's formula
   // (e.g. an unmeasured Gemini sibling falling through to the OpenAI fallback).
-  // Which ids those are is profile-table knowledge, not a rule maintained here.
   if (isMisresolvedModelId(base)) return false;
   const unqualified = unqualifiedModelId(base);
-  return allowedModelBases().some((b) => {
+  return allowedModelBasesForScope(scope).some((b) => {
     const target = b.toLowerCase();
     return modelBaseMatches(base, target)
       || (unqualified !== null && modelBaseMatches(unqualified, target));
   });
 }
 
-/** True when pxpipe may transform this Anthropic/Google model under the active scope. */
+/** Public pure model gate for a specific semantic profile. */
+export function isPxpipeSupportedModelForScope(
+  model: string | null | undefined,
+  scope: PxpipeSafetyScope,
+): boolean {
+  return isAllowedForScope(model, scope);
+}
+
+/** True when pxpipe may transform this Anthropic/Google model under the active host scope. */
 export function isPxpipeSupportedModel(model: string | null | undefined): boolean {
-  return isAllowed(model);
+  return isAllowedForScope(model, activeSafetyScope());
 }
 
 /** True when pxpipe may transform this GPT model. Shares the single PXPIPE_MODELS scope. */
 export function isPxpipeSupportedGptModel(model: string | null | undefined): boolean {
-  return isAllowed(model);
+  return isAllowedForScope(model, activeSafetyScope());
 }
 
 /** Canonical set of Anthropic Messages routes pxpipe transforms. Shared with
