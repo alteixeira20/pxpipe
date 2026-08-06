@@ -1,0 +1,161 @@
+import { createProxy, type ProxyConfig, type ProxyEvent } from './proxy.js';
+
+export type ProviderProtocol = 'anthropic' | 'openai' | 'google';
+
+export interface ProviderRouteDefinition {
+  /** Stable route id used in `/providers/<id>/...`. */
+  id: string;
+  /** Wire protocol accepted by the configured upstream. */
+  protocol: ProviderProtocol;
+  /** Existing proxy configuration for this provider. Kept in memory only. */
+  proxy: ProxyConfig;
+}
+
+export interface ProviderRouterConfig {
+  /** Handles legacy unprefixed routes such as `/v1/messages`. */
+  defaultProxy: ProxyConfig;
+  /** Explicitly addressable providers. */
+  providers: readonly ProviderRouteDefinition[];
+  /** Optional observer invoked after the provider-specific observer. */
+  onRequest?: (providerId: string, event: ProxyEvent) => void | Promise<void>;
+}
+
+export interface ParsedProviderRoute {
+  providerId: string;
+  upstreamPath: string;
+}
+
+export interface ProviderRouterInspection {
+  defaultRoute: 'legacy';
+  providers: Array<{
+    id: string;
+    protocol: ProviderProtocol;
+    prefix: string;
+  }>;
+}
+
+const PROVIDER_ID = /^[a-z][a-z0-9-]{0,62}$/;
+const PREFIX = '/providers/';
+
+export function assertProviderId(id: string): void {
+  if (!PROVIDER_ID.test(id)) {
+    throw new Error(
+      `invalid provider id ${JSON.stringify(id)}; expected lowercase letters, digits and dashes`,
+    );
+  }
+}
+
+/**
+ * Parse an explicit provider-prefixed request path.
+ *
+ * The provider id is never accepted from a header, query string or body. This
+ * keeps routing metadata outside the model payload and prevents an untrusted
+ * client from overriding upstream selection through a forwarded header.
+ */
+export function parseProviderRoute(pathname: string): ParsedProviderRoute | null {
+  if (!pathname.startsWith(PREFIX)) return null;
+  const remainder = pathname.slice(PREFIX.length);
+  const slash = remainder.indexOf('/');
+  if (slash <= 0) return null;
+
+  const providerId = remainder.slice(0, slash);
+  if (!PROVIDER_ID.test(providerId)) return null;
+
+  const upstreamPath = remainder.slice(slash);
+  if (!upstreamPath.startsWith('/') || upstreamPath.startsWith('//')) return null;
+  return { providerId, upstreamPath };
+}
+
+function wrapProviderObserver(
+  definition: ProviderRouteDefinition,
+  routerObserver: ProviderRouterConfig['onRequest'],
+): ProxyConfig {
+  const providerObserver = definition.proxy.onRequest;
+  return {
+    ...definition.proxy,
+    onRequest: async (event) => {
+      // Keep provider identity explicit even for generic OpenAI-compatible
+      // providers whose core handler would otherwise leave it unset.
+      event.provider ??= definition.id;
+      await providerObserver?.(event);
+      await routerObserver?.(definition.id, event);
+    },
+  };
+}
+
+function rewriteProviderRequest(request: Request, route: ParsedProviderRoute): Request {
+  const sourceUrl = new URL(request.url);
+  sourceUrl.pathname = route.upstreamPath;
+
+  // Request construction clones method, headers, body, duplex semantics and
+  // abort signal without consuming or decoding the payload. Tool schemas,
+  // prompts, binary parts and structured-output contracts remain untouched.
+  return new Request(sourceUrl, request);
+}
+
+/**
+ * Create one request handler that multiplexes several provider-specific
+ * `createProxy` instances behind a single HTTP listener.
+ *
+ * Legacy paths continue through `defaultProxy`. Explicit provider paths use:
+ *
+ *   /providers/<provider-id>/<upstream-path>
+ *
+ * Example:
+ *
+ *   /providers/featherless/v1/chat/completions
+ *       -> Featherless handler sees /v1/chat/completions
+ */
+export function createProviderRouter(
+  config: ProviderRouterConfig,
+): ((request: Request) => Promise<Response>) & { inspect(): ProviderRouterInspection } {
+  const defaultHandler = createProxy(config.defaultProxy);
+  const handlers = new Map<string, ReturnType<typeof createProxy>>();
+  const definitions = new Map<string, ProviderRouteDefinition>();
+
+  for (const definition of config.providers) {
+    assertProviderId(definition.id);
+    if (definitions.has(definition.id)) {
+      throw new Error(`duplicate provider id: ${definition.id}`);
+    }
+    definitions.set(definition.id, definition);
+    handlers.set(
+      definition.id,
+      createProxy(wrapProviderObserver(definition, config.onRequest)),
+    );
+  }
+
+  const route = async (request: Request): Promise<Response> => {
+    const parsed = parseProviderRoute(new URL(request.url).pathname);
+    if (!parsed) return defaultHandler(request);
+
+    const handler = handlers.get(parsed.providerId);
+    if (!handler) {
+      return new Response(
+        JSON.stringify({
+          error: 'unknown_provider',
+          provider: parsed.providerId,
+        }),
+        {
+          status: 404,
+          headers: { 'content-type': 'application/json' },
+        },
+      );
+    }
+
+    return handler(rewriteProviderRequest(request, parsed));
+  };
+
+  return Object.assign(route, {
+    inspect(): ProviderRouterInspection {
+      return {
+        defaultRoute: 'legacy',
+        providers: [...definitions.values()].map((definition) => ({
+          id: definition.id,
+          protocol: definition.protocol,
+          prefix: `${PREFIX}${definition.id}`,
+        })),
+      };
+    },
+  });
+}
