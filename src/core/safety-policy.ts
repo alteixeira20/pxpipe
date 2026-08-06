@@ -28,7 +28,8 @@ const EXACT_MACHINE_TOKEN = /(?:\b[0-9a-f]{7,40}\b|\b[A-Z][A-Z0-9_]{2,}\b|--[A-Z
  * A false negative can make an agent re-read a file, mis-copy an identifier, or
  * act on an incomplete diagnostic. A false positive merely leaves some tokens as
  * text. Bias heavily toward text for code, machine state, diagnostics and exact
- * identifiers; image compression remains available for long prose/reference bulk.
+ * identifiers. The predicate remains public for hosts that deliberately opt into
+ * tool-result imaging; the production-safe profiles do not image live tool output.
  */
 export function shouldKeepToolResultSharp(block: KeepSharpBlock): boolean {
   const text = block.text;
@@ -47,6 +48,8 @@ export function shouldKeepToolResultSharp(block: KeepSharpBlock): boolean {
     || EXACT_MACHINE_TOKEN.test(sample);
 }
 
+const HISTORY_ONLY_STATIC_FLOOR = Number.MAX_SAFE_INTEGER;
+
 const PROFILES: Record<CompressionProfileName, CompressionProfile> = {
   'coding-safe': {
     name: 'coding-safe',
@@ -55,9 +58,10 @@ const PROFILES: Record<CompressionProfileName, CompressionProfile> = {
       compress: true,
       compressTools: false,
       compressToolResults: false,
-      // Anthropic transform treats an oversized min as a history-only mode: static
-      // system text stays native while runHistoryCollapseAndFinalize still runs.
-      minCompressChars: Number.MAX_SAFE_INTEGER,
+      // Anthropic treats an oversized static threshold as history-only mode:
+      // system/tool authority remains in its original text role while the closed
+      // archival conversation prefix can still clear its independent history gate.
+      minCompressChars: HISTORY_ONLY_STATIC_FLOOR,
       collapseHistory: true,
       historyAmortizationHorizon: 4,
       reflow: true,
@@ -72,13 +76,12 @@ const PROFILES: Record<CompressionProfileName, CompressionProfile> = {
   },
   balanced: {
     name: 'balanced',
-    description: 'native tool instructions; conservative low-risk bulk compression',
+    description: 'native authority/tool state with a shorter protected history tail',
     transform: {
       compress: true,
       compressTools: false,
-      compressToolResults: true,
-      minToolResultChars: 12_000,
-      maxImagesPerToolResult: 8,
+      compressToolResults: false,
+      minCompressChars: HISTORY_ONLY_STATIC_FLOOR,
       collapseHistory: true,
       historyAmortizationHorizon: 3,
       reflow: true,
@@ -93,7 +96,7 @@ const PROFILES: Record<CompressionProfileName, CompressionProfile> = {
   },
   aggressive: {
     name: 'aggressive',
-    description: 'legacy maximum-density policy; controlled A/B use only',
+    description: 'legacy lossy maximum-density policy; controlled A/B use only',
     transform: {
       compress: true,
       compressTools: true,
