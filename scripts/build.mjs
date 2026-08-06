@@ -60,6 +60,10 @@ const entrypoints = [
     output: 'dist/agy-execution.js',
   },
   {
+    input: 'src/agy-models-cli.ts',
+    output: 'dist/agy-models-cli.js',
+  },
+  {
     input: 'src/featherless-cli.ts',
     output: 'dist/featherless-cli.js',
   },
@@ -75,7 +79,7 @@ for (const entrypoint of entrypoints) {
 }
 
 console.log(
-  '✓ built dist/node.js, dist/agy.js, dist/agy-execution.js and dist/featherless-cli.js',
+  '✓ built dist/node.js, dist/agy.js, dist/agy-execution.js, dist/agy-models-cli.js and dist/featherless-cli.js',
 );
 
 const versionSmoke = spawnSync(
@@ -102,6 +106,7 @@ if (
 const exportSmokes = [
   ['dist/agy.js', 'runAgyEntry'],
   ['dist/agy-execution.js', 'runAgyBatchEntry'],
+  ['dist/agy-models-cli.js', 'runAgyModelsCli'],
   ['dist/featherless-cli.js', 'runFeatherlessCli'],
 ];
 
