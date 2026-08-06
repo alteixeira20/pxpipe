@@ -624,9 +624,14 @@ function renderTransformationStateBadge(e: RecentRow): string {
   if (state === 'fallback' || state === 'fallback-to-text') {
     return `<span class="badge badge-fallback">fallback-to-text</span>`;
   }
-  if (state === 'degraded' || state === 'capability-skipped' || state === 'skipped') {
-    const label = state === 'degraded' ? 'degraded' : 'capability-skipped';
-    return `<span class="badge badge-warn">${label}</span>`;
+  if (state === 'degraded') {
+    return `<span class="badge badge-warn">degraded</span>`;
+  }
+  if (state === 'capability-skipped') {
+    return `<span class="badge badge-warn">capability-skipped</span>`;
+  }
+  if (state === 'skipped') {
+    return `<span class="badge badge-warn">skipped</span>`;
   }
   if (state === 'passthrough' || state === 'plain pass-through') {
     return `<span class="badge badge-txt">plain pass-through</span>`;

@@ -33,6 +33,7 @@ import {
   normalizeUpstreamRoot,
   recordCircuitBreakerFailure,
   recordCircuitBreakerSuccess,
+  shouldFallbackFeatherlessResponse,
   type FeatherlessCapabilityDecision,
   type FeatherlessCapabilityResult,
   type FeatherlessTransformationState,
@@ -1790,10 +1791,14 @@ export function createProxy(config: ProxyConfig = {}) {
         const inspection = await inspectResponseForErrorEnvelope(upstreamRes);
         upstreamRes = inspection.response;
 
-        if (inspection.isError) {
-          recordCircuitBreakerFailure('featherless', upstreamBase, targetM);
+        if (inspection.isError && shouldFallbackFeatherlessResponse(
+          upstreamRes.status,
+          inspection.errorMsg,
+        )) {
           fallbackAttempted = true;
-          fallbackReason = !upstreamRes.ok ? `http_status_${upstreamRes.status}` : (inspection.errorMsg ?? 'provider_error_envelope');
+          fallbackReason = !upstreamRes.ok
+            ? `http_status_${upstreamRes.status}`
+            : (inspection.errorMsg ?? 'provider_error_envelope');
           const attempt2 = await executeFetch(originalBodyBytes as unknown as BodyInit);
           upstreamAttemptCount = 2;
           const retryInspection = await inspectResponseForErrorEnvelope(attempt2.res);
@@ -1802,15 +1807,23 @@ export function createProxy(config: ProxyConfig = {}) {
             timeoutKind = 'idle';
             attempt2.abortController.abort(new Error('pxpipe: upstream stalled'));
           });
+          transformationState = 'fallback';
+          upstreamRes = retryResFinal;
           if (!retryInspection.isError) {
+            // Only a successful text retry proves that the transformed shape was
+            // the problem. Provider-wide failures must not poison this breaker.
+            recordCircuitBreakerFailure('featherless', upstreamBase, targetM);
             fallbackResult = 'success';
-            transformationState = 'fallback';
-            upstreamRes = retryResFinal;
           } else {
             fallbackResult = 'failed';
-            transformationState = 'fallback';
-            upstreamRes = retryResFinal;
           }
+        } else if (inspection.isError) {
+          fallbackReason = !upstreamRes.ok
+            ? `http_status_${upstreamRes.status}`
+            : (inspection.errorMsg ?? 'provider_error_envelope');
+          // The transformed request was sent, but a transient/provider-wide
+          // failure is returned directly without an immediate duplicate retry.
+          transformationState = 'transformed';
         } else {
           recordCircuitBreakerSuccess('featherless', upstreamBase, targetM);
           transformationState = 'transformed';
