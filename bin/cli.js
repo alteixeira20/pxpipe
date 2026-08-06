@@ -1,7 +1,17 @@
 #!/usr/bin/env node
-// Tiny shim: just runs the bundled Node entry. Real CLI logic lives in src/node.ts.
-import('../dist/node.js').catch((err) => {
-  console.error('[pxpipe] failed to start:', err);
-  console.error('[pxpipe] did you forget to `npm run build`?');
-  process.exit(1);
-});
+
+const argv = process.argv.slice(2);
+const featherlessDispatch =
+  (argv[0] === 'models' && argv[1] === 'featherless')
+  || (argv[0] === 'doctor' && argv[1] === 'featherless');
+const entry = featherlessDispatch ? '../dist/featherless-cli.js' : '../dist/node.js';
+
+import(entry)
+  .then(async (module) => {
+    if (featherlessDispatch) await module.runFeatherlessCli(argv);
+  })
+  .catch((err) => {
+    console.error('[pxpipe] failed to start:', err);
+    console.error('[pxpipe] did you forget to `npm run build`?');
+    process.exit(1);
+  });
