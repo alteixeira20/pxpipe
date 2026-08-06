@@ -651,11 +651,33 @@ describe('Featherless / Kimi-K3 Integration & Regressions', () => {
         if (input.toString().includes('/v1/models/')) {
           return new Response(JSON.stringify({ vision_supported: true }));
         }
+
         callCount++;
+
+        // Odd calls are transformed requests. Even calls are the original-text
+        // fallbacks. A successful fallback proves that the transformed request
+        // shape caused the failure and should count towards the image breaker.
+        if (callCount % 2 === 1) {
+          return new Response(JSON.stringify({
+            message: 'Image-shaped input rejected',
+            code: 'completion_error',
+          }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+
         return new Response(JSON.stringify({
-          message: 'Persistent error',
-          code: 'completion_error',
-        }), { status: 200, headers: { 'content-type': 'application/json' } });
+          choices: [{
+            message: {
+              role: 'assistant',
+              content: 'Text fallback succeeded',
+            },
+          }],
+        }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
       };
 
       let lastEvent: ProxyEvent | undefined;
