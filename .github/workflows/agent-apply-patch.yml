@@ -1,0 +1,83 @@
+name: Agent apply validated patch
+
+on:
+  push:
+    branches:
+      - 'reliability/**'
+    paths:
+      - '.github/agent-patches/*.patch'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: agent-patch-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  apply-test-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+
+      - name: Locate patch
+        id: patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t patches < <(find .github/agent-patches -maxdepth 1 -type f -name '*.patch' -print | sort)
+          if [ "${#patches[@]}" -ne 1 ]; then
+            echo "expected exactly one patch, found ${#patches[@]}" >&2
+            exit 1
+          fi
+          echo "path=${patches[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Validate and apply patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git apply --check --whitespace=error-all "${{ steps.patch.outputs.path }}"
+          git apply --whitespace=error-all "${{ steps.patch.outputs.path }}"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Enable pnpm
+        shell: bash
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.21.0 --activate
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Commit validated changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "pxpipe-reliability-bot"
+          git config user.email "pxpipe-reliability-bot@users.noreply.github.com"
+          git add -A ':!.github/agent-patches'
+          if git diff --cached --quiet; then
+            echo "patch produced no source changes" >&2
+            exit 1
+          fi
+          git commit -m "fix(reliability): enforce coding-safe compression policy"
+          git push origin "HEAD:${{ github.ref_name }}"
