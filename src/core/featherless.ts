@@ -257,6 +257,30 @@ export function buildFeatherlessUpstreamUrl(base: string, rawPath: string): stri
  * e.g., {"message": "This model is busy, please try again later.", "code": "completion_error"}
  * or {"error": ...}
  */
+/**
+ * Returns true only when retrying the original text request can plausibly
+ * distinguish an image-compatibility failure from a provider-wide failure.
+ *
+ * Transient load, authentication, routing and server failures must not trigger a
+ * second upstream request: retrying them immediately doubles traffic, worsens
+ * rate limits, and can incorrectly open the image circuit breaker.
+ */
+export function shouldFallbackFeatherlessResponse(
+  status: number,
+  errorMessage?: string,
+): boolean {
+  if (status === 408 || status === 425 || status === 429 || status >= 500) return false;
+  if (status === 401 || status === 403 || status === 404 || status === 409) return false;
+
+  if (status >= 400) {
+    return status === 400 || status === 413 || status === 415 || status === 422;
+  }
+
+  if (!errorMessage) return false;
+  return /(image|vision|multimodal|modality|unsupported\s+(?:content|input)|invalid\s+(?:image|content)|payload\s+too\s+large)/i
+    .test(errorMessage);
+}
+
 export function detectProviderErrorEnvelope(bodyText: string): string | null {
   if (!bodyText || !bodyText.trim().startsWith('{')) return null;
   try {
