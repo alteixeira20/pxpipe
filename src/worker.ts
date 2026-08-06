@@ -16,7 +16,7 @@ import type { TransformOptions } from './core/transform.js';
 import { createFailOpenProxy } from './core/fail-open.js';
 import { resolveCompressionProfile } from './core/safety-policy.js';
 import { toTrackEvent, JsonLogTracker, noopTracker, type Tracker } from './core/tracker.js';
-import { setAllowedModelBases } from './core/applicability.js';
+import { setAllowedModelBases, setCompressionSafetyScope } from './core/applicability.js';
 
 export interface Env {
   /** Optional single upstream base for every API family. Family-specific env vars override it. */
@@ -75,6 +75,11 @@ const truthy = (v: string | undefined, fallback: boolean): boolean =>
 
 export default {
   async fetch(req: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
+    const profile = resolveCompressionProfile(env.PXPIPE_PROFILE);
+    // Workers do not have process.env, so explicitly install the host safety scope
+    // before model applicability is checked. Safe/balanced can never be weakened
+    // by a stale PXPIPE_MODELS setting; aggressive remains an explicit opt-in.
+    setCompressionSafetyScope(profile.name);
     const configuredModels = env.PXPIPE_MODELS?.trim();
     setAllowedModelBases(
       configuredModels === undefined || configuredModels === ''
@@ -111,7 +116,6 @@ export default {
       req.headers.delete('x-pxpipe-secret');
     }
 
-    const profile = resolveCompressionProfile(env.PXPIPE_PROFILE);
     const transform: TransformOptions = {
       ...profile.transform,
       // Global COMPRESS remains a one-way emergency kill switch. It cannot turn
