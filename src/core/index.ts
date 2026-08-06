@@ -3,6 +3,7 @@ export {
   getConfiguredModelBases,
   isPxpipeSupportedGptModel,
   isPxpipeSupportedModel,
+  isPxpipeSupportedModelForScope,
   setAllowedModelBases,
   setCompressionSafetyScope,
   shouldTransformAnthropicMessages,
