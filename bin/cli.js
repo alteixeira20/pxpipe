@@ -26,7 +26,7 @@ if (batchDispatch) {
 } else if (agyModelsDispatch) {
   entry = '../dist/agy-models-cli.js';
 } else if (agyDispatch) {
-  entry = '../dist/agy.js';
+  entry = '../dist/agy-entry.js';
 } else if (featherlessDispatch) {
   entry = '../dist/featherless-cli.js';
 }
@@ -38,7 +38,7 @@ import(entry)
     } else if (agyModelsDispatch) {
       await module.runAgyModelsCli(argv);
     } else if (agyDispatch) {
-      await module.runAgyEntry(argv);
+      await module.runAgyEntryV2(argv);
     } else if (featherlessDispatch) {
       await module.runFeatherlessCli(argv);
     }
