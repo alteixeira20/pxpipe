@@ -13,6 +13,7 @@ const agyDispatch =
   || (argv[0] === 'warp' && isAgyWord(warpCommand));
 
 const batchDispatch = argv[0] === 'agy-batch';
+const agyModelsDispatch = argv[0] === 'models' && argv[1] === 'agy';
 
 const featherlessDispatch =
   (argv[0] === 'models' && argv[1] === 'featherless')
@@ -22,6 +23,8 @@ let entry = '../dist/node.js';
 
 if (batchDispatch) {
   entry = '../dist/agy-execution.js';
+} else if (agyModelsDispatch) {
+  entry = '../dist/agy-models-cli.js';
 } else if (agyDispatch) {
   entry = '../dist/agy.js';
 } else if (featherlessDispatch) {
@@ -32,6 +35,8 @@ import(entry)
   .then(async (module) => {
     if (batchDispatch) {
       await module.runAgyBatchEntry(argv.slice(1));
+    } else if (agyModelsDispatch) {
+      await module.runAgyModelsCli(argv);
     } else if (agyDispatch) {
       await module.runAgyEntry(argv);
     } else if (featherlessDispatch) {
