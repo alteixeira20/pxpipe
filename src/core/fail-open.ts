@@ -10,6 +10,13 @@ const SNIFF_LIMIT = 4 * 1024;
 
 type ProxyRequest = Parameters<ReturnType<typeof createProxy>>[0];
 
+export interface FailOpenHostOptions {
+  /** Explicit host policy for runtimes (notably Workers) where process.env is
+   * unavailable or may be shimmed by a test/bundler. Node may omit this and
+   * retain the PXPIPE_PROFILE environment contract. */
+  safetyScope?: PxpipeSafetyScope;
+}
+
 /** `@cloudflare/workers-types` augments Request with host metadata generics while
  * Node's Web Request is the unparameterized form. createProxy intentionally uses
  * only standard Request fields, so normalize the structurally compatible value at
@@ -58,7 +65,12 @@ function parseSafetyScope(raw: string | undefined): PxpipeSafetyScope | undefine
  * so an unset profile means the new coding-safe default here. Explicit aggressive
  * remains available for controlled evaluation.
  */
-export function resolveHostedSafetyScope(config: ProxyConfig): PxpipeSafetyScope {
+export function resolveHostedSafetyScope(
+  config: ProxyConfig,
+  explicitScope?: PxpipeSafetyScope,
+): PxpipeSafetyScope {
+  if (explicitScope) return explicitScope;
+
   if (typeof process !== 'undefined') {
     return parseSafetyScope(process.env?.PXPIPE_PROFILE) ?? 'coding-safe';
   }
@@ -91,10 +103,11 @@ export function resolveHostedSafetyScope(config: ProxyConfig): PxpipeSafetyScope
  */
 export function resolveHostedFeatherlessMode(
   config: ProxyConfig,
+  explicitScope?: PxpipeSafetyScope,
 ): ProxyConfig['featherlessTransformMode'] {
   if (config.featherlessTransformMode !== undefined) return config.featherlessTransformMode;
 
-  const scope = resolveHostedSafetyScope(config);
+  const scope = resolveHostedSafetyScope(config, explicitScope);
   if (scope !== 'aggressive') return 'off';
 
   if (typeof process !== 'undefined') {
@@ -138,11 +151,12 @@ export async function isPxpipeTransformFailure(response: Response): Promise<bool
  */
 export function createFailOpenProxy(
   config: ProxyConfig,
+  hostOptions: FailOpenHostOptions = {},
 ): ((request: Request) => Promise<Response>) {
   const observer = config.onRequest;
-  const safetyScope = resolveHostedSafetyScope(config);
+  const safetyScope = resolveHostedSafetyScope(config, hostOptions.safetyScope);
   setCompressionSafetyScope(safetyScope);
-  const featherlessTransformMode = resolveHostedFeatherlessMode(config);
+  const featherlessTransformMode = resolveHostedFeatherlessMode(config, safetyScope);
   const hostedConfig: ProxyConfig = {
     ...config,
     ...(featherlessTransformMode !== undefined ? { featherlessTransformMode } : {}),
