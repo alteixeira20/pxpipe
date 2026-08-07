@@ -6,6 +6,9 @@ import type { Message } from '../src/core/types.js';
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
+// U+FE0F is intentionally exempt from atlas escaping and is therefore a stable
+// fixture for exercising renderer-reported character loss without inventing a
+// synthetic renderer failure.
 function historyWithVariationSelector(): Message[] {
   const messages: Message[] = [];
   for (let index = 0; index < 24; index += 1) {
