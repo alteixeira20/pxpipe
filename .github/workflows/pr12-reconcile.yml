@@ -1,0 +1,125 @@
+name: PR12 reconciliation
+
+on:
+  push:
+    branches: [reliability/coding-safe-core]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pr12-reconcile
+  cancel-in-progress: true
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: reliability/coding-safe-core
+          fetch-depth: 0
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Reconcile tests with explicit aggressive-mode contracts
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              p = Path(path)
+              text = p.read_text()
+              if old not in text:
+                  raise SystemExit(f"expected block not found in {path}: {old[:120]!r}")
+              p.write_text(text.replace(old, new, 1))
+
+          # Public-library tests that intentionally exercise lossy rendering must
+          # opt into the aggressive profile. The product/default contract remains
+          # coding-safe and therefore keeps authority/tool state native.
+          replace_once(
+              'tests/public-api.test.ts',
+              "const transformed = await transformAnthropicMessages({ body: supported, model: 'claude-fable-5' });",
+              "const transformed = await transformAnthropicMessages({\n      body: supported,\n      model: 'claude-fable-5',\n      options: { profile: 'aggressive' },\n    });",
+          )
+          replace_once(
+              'tests/public-api.test.ts',
+              "options: { charsPerToken: 1, minCompressChars: 1, cols: undefined },",
+              "options: { profile: 'aggressive', charsPerToken: 1, minCompressChars: 1, cols: undefined },",
+          )
+          replace_once(
+              'tests/public-api.test.ts',
+              "const transformed = await transformAnthropicMessages({ body, model: 'claude-fable-5' });",
+              "const transformed = await transformAnthropicMessages({\n      body,\n      model: 'claude-fable-5',\n      options: { profile: 'aggressive' },\n    });",
+          )
+
+          replace_once(
+              'tests/keep-sharp.test.ts',
+              "charsPerToken: 2,\n        keepSharp: (blk) => blk.kind === 'tool_result',",
+              "profile: 'aggressive',\n        charsPerToken: 2,\n        keepSharp: (blk) => blk.kind === 'tool_result',",
+          )
+          replace_once(
+              'tests/recoverable.test.ts',
+              "options: { charsPerToken: 2, emitRecoverable: true },",
+              "options: { profile: 'aggressive', charsPerToken: 2, emitRecoverable: true },",
+          )
+
+          # Fault injection must actually enter the transform path; coding-safe
+          # intentionally skips this tiny no-history request.
+          replace_once(
+              'tests/fail-open.test.ts',
+              "it('retries once as native text when transform setup throws before upstream', async () => {\n    const inferenceUrls: string[] = [];",
+              "it('retries once as native text when transform setup throws before upstream', async () => {\n    process.env.PXPIPE_PROFILE = 'aggressive';\n    const inferenceUrls: string[] = [];",
+          )
+
+          # This test is about filesystem permissions on rendered artifacts, not
+          # about the default safety policy, so force an explicit render profile.
+          replace_once(
+              'tests/node-security.test.ts',
+              "const { base } = await startNode({ PXPIPE_DUMP_DIR: dumpDir });",
+              "const { base } = await startNode({\n      PXPIPE_DUMP_DIR: dumpDir,\n      PXPIPE_PROFILE: 'aggressive',\n    });",
+          )
+
+          # Existing Worker profile tests validate historical render geometry and
+          # PXPIPE_MODELS behavior. Keep those contracts behind explicit A/B mode.
+          replace_once(
+              'tests/worker-profile.test.ts',
+              "PXPIPE_MODELS: 'claude-fable-5,claude-opus-5',\n          COMPRESS: '1',",
+              "PXPIPE_MODELS: 'claude-fable-5,claude-opus-5',\n          PXPIPE_PROFILE: 'aggressive',\n          COMPRESS: '1',",
+          )
+          replace_once(
+              'tests/worker-profile.test.ts',
+              "{ ANTHROPIC_UPSTREAM: 'https://anthropic.test', PXPIPE_MODELS: configured, MIN_COMPRESS_CHARS: '1' },",
+              "{\n            ANTHROPIC_UPSTREAM: 'https://anthropic.test',\n            PXPIPE_MODELS: configured,\n            PXPIPE_PROFILE: 'aggressive',\n            MIN_COMPRESS_CHARS: '1',\n          },",
+          )
+
+          readme = Path('README.md')
+          text = readme.read_text()
+          heading = '## Offline export (no proxy)'
+          if heading not in text:
+              marker = '## Reliability profiles'
+              if marker not in text:
+                  raise SystemExit('README reliability-profile insertion marker not found')
+              section = '''## Offline export (no proxy)\n\nOffline export is an explicit/manual image workflow and is independent of the\n`coding-safe` proxy default. It is useful when you deliberately want to inspect or\nupload dense rendered reference material without running the proxy.\n\n```bash\npxpipe export src/\ncat prompt.txt | pxpipe export --stdin\npxpipe export --git\n```\n\nEach run creates a fresh `pxpipe-export-XXXXXX/` directory containing\n`page-*.png`, `factsheet.txt`, `manifest.json`, and `prompt.txt`. Those pages can\nbe uploaded to image-capable clients such as Cursor. This is an explicit lossy\noperation; source code and other byte-exact working state should remain native text\nin normal coding-agent sessions.\n\n'''
+              text = text.replace(marker, section + marker, 1)
+              readme.write_text(text)
+          PY
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run audit
+      - run: pnpm run typecheck
+      - run: pnpm test
+      - run: pnpm run build
+      - name: Commit reconciled branch and remove temporary workflow
+        shell: bash
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git rm .github/workflows/pr12-reconcile.yml
+          git add README.md tests/public-api.test.ts tests/keep-sharp.test.ts tests/recoverable.test.ts tests/fail-open.test.ts tests/node-security.test.ts tests/worker-profile.test.ts
+          git diff --cached --check
+          git commit -m "test(reliability): align explicit lossy contracts with coding-safe default"
+          git push origin HEAD:reliability/coding-safe-core
