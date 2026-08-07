@@ -163,10 +163,12 @@ describe('fail-open integration', () => {
     // exactly once: the primary transform failed before any upstream request.
     expect(inferenceUrls).toHaveLength(1);
 
-    // The synthetic primary 502 is suppressed; telemetry describes the one real
-    // upstream attempt that the caller actually received.
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(observed).toHaveBeenCalledTimes(1);
-    expect(observed.mock.calls[0]?.[0]?.status).toBe(200);
+    // Completion telemetry is finalized when the streamed fallback response
+    // reaches EOF. Wait for that lifecycle instead of assuming one event-loop
+    // tick is sufficient on every supported Node runtime.
+    await vi.waitFor(() => {
+      expect(observed).toHaveBeenCalledTimes(1);
+      expect(observed.mock.calls[0]?.[0]?.status).toBe(200);
+    });
   });
 });
