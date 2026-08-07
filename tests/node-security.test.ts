@@ -163,7 +163,12 @@ describe('Node dashboard security', () => {
 
   it('creates rendered PNG dumps with private permissions', async () => {
     const dumpDir = path.join(os.tmpdir(), `pxpipe-dumps-${process.pid}-${Date.now()}`);
-    const { base } = await startNode({ PXPIPE_DUMP_DIR: dumpDir });
+    // This test verifies filesystem permissions on an intentionally rendered
+    // artifact, not the coding-safe default. Explicitly opt into lossy mode.
+    const { base } = await startNode({
+      PXPIPE_DUMP_DIR: dumpDir,
+      PXPIPE_PROFILE: 'aggressive',
+    });
     await fetch(`${base}/v1/messages`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-api-key': 'test' },
