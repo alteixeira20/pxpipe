@@ -17,10 +17,13 @@ export function persistentWarpRouteSpecs(port: number): string[] {
     `api.openai.com/v1/responses*=${local}/providers/openai`,
     `api.featherless.ai/v1/chat/completions*=${local}/providers/featherless`,
     `api.featherless.ai/v1/responses*=${local}/providers/featherless`,
-    `generativelanguage.googleapis.com/v1beta/models/*:generateContent*=${local}/providers/google`,
-    `generativelanguage.googleapis.com/v1beta/models/*:streamGenerateContent*=${local}/providers/google`,
-    `generativelanguage.googleapis.com/v1/models/*:generateContent*=${local}/providers/google`,
-    `generativelanguage.googleapis.com/v1/models/*:streamGenerateContent*=${local}/providers/google`,
+    // Warp route patterns intentionally support one `*`. The request matcher
+    // receives URL.pathname (query is handled separately by rewriteUrl), so the
+    // model segment is the only wildcard required for Google inference methods.
+    `generativelanguage.googleapis.com/v1beta/models/*:generateContent=${local}/providers/google`,
+    `generativelanguage.googleapis.com/v1beta/models/*:streamGenerateContent=${local}/providers/google`,
+    `generativelanguage.googleapis.com/v1/models/*:generateContent=${local}/providers/google`,
+    `generativelanguage.googleapis.com/v1/models/*:streamGenerateContent=${local}/providers/google`,
   ];
 }
 
