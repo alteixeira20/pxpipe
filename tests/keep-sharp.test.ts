@@ -171,8 +171,8 @@ describe('keepSharp fidelity hint', () => {
   });
 
   it('is reachable through the public library wrapper', async () => {
-    // Fable is the supported model by default; the wrapper gates on
-    // `input.model`, so set it to a Fable alias to run the real transform.
+    // This assertion intentionally exercises the lossy tool-result path, so it
+    // opts into aggressive mode instead of weakening the coding-safe default.
     const result = await transformAnthropicMessages({
       body: makeReq(
         [{ type: 'tool_result', tool_use_id: 'toolu_a', content: BIG }],
@@ -180,6 +180,7 @@ describe('keepSharp fidelity hint', () => {
       ),
       model: 'claude-fable-5',
       options: {
+        profile: 'aggressive',
         // library surface to charsPerToken / historyAmortizationHorizon / keepSharp.
         charsPerToken: 2,
         keepSharp: (blk) => blk.kind === 'tool_result',
