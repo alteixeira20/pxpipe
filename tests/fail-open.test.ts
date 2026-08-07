@@ -105,6 +105,10 @@ describe('fail-open retry body cloning scope', () => {
 
 describe('fail-open integration', () => {
   it('retries once as native text when transform setup throws before upstream', async () => {
+    // The coding-safe profile intentionally skips this tiny request because it
+    // has no archival history. Fault injection therefore uses explicit
+    // aggressive mode so the custom transformer is actually invoked.
+    process.env.PXPIPE_PROFILE = 'aggressive';
     const inferenceUrls: string[] = [];
     const upstreamFetch = vi.fn(async (input: string | URL | Request) => {
       const url = typeof input === 'string'
