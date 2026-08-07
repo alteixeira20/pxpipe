@@ -64,7 +64,9 @@ export interface GoogleGenerateContentRequest {
   [key: string]: unknown;
 }
 
-const GOOGLE_ROUTE = /^\/google-ai-studio\/(?:v1|v1beta)\/models\/([^/:]+):(generateContent|streamGenerateContent)$/;
+// Accept both the historical gateway-prefixed form and the native Google API
+// pathname used by the explicit single-listener `/providers/google` route.
+const GOOGLE_ROUTE = /^\/(?:google-ai-studio\/)?(?:v1|v1beta)\/models\/([^/:]+):(generateContent|streamGenerateContent)$/;
 
 export function parseGoogleModelFromPath(pathname: string): string | null {
   const match = GOOGLE_ROUTE.exec(pathname);
@@ -495,6 +497,12 @@ export async function transformGoogleGenerateContent(
     maxImagesPerToolResult?: number;
     cols?: number;
     reflow?: boolean;
+    /** Same static-context eligibility threshold used by the cross-provider
+     * reliability profiles. coding-safe/balanced set this to MAX_SAFE_INTEGER
+     * so system/developer authority remains native. */
+    minCompressChars?: number;
+    /** Refuse any candidate for which the renderer reports dropped characters. */
+    requireLosslessRender?: boolean;
   } = {},
 ): Promise<{ body: Uint8Array; info: TransformInfo }> {
   if (!isGeminiModel(modelName)) {
@@ -555,8 +563,11 @@ export async function transformGoogleGenerateContent(
   let nativeInjectedTokens = 0;
   let fsText: string | null = null;
   let renderedText = '';
+  let staticDroppedChars = 0;
+  const staticDroppedCodepoints = new Map<number, number>();
+  const staticEligible = combinedRaw.length >= (options.minCompressChars ?? 1);
 
-  if (combinedRaw) {
+  if (combinedRaw && staticEligible) {
     const combined = compactSlabWhitespace(combinedRaw).trimEnd();
     const reflowNote = options.reflow !== false
       ? ' The glyph ↵ (U+21B5) marks an original hard line break in content; treat it as a real newline.'
@@ -571,6 +582,15 @@ export async function transformGoogleGenerateContent(
     );
 
     staticImages = await renderTextToPngs(renderedText, cols, profile.style, profile.maxHeightPx);
+    for (const image of staticImages) {
+      staticDroppedChars += image.droppedChars;
+      for (const [codepoint, count] of image.droppedCodepoints) {
+        staticDroppedCodepoints.set(
+          codepoint,
+          (staticDroppedCodepoints.get(codepoint) ?? 0) + count,
+        );
+      }
+    }
     imageTokens = staticImages.reduce(
       (total, image) => total + geminiVisionTokens(modelName, image.width, image.height),
       0,
@@ -592,7 +612,8 @@ export async function transformGoogleGenerateContent(
       burnTextSide: 0,
       profitable: imageTokens + nativeInjectedTokens < textTokens,
     };
-    staticProfitable = info.gateEval.profitable;
+    staticProfitable = info.gateEval.profitable
+      && !(options.requireLosslessRender && staticDroppedChars > 0);
   }
 
   // Build static image parts if static slab is profitable
@@ -613,9 +634,15 @@ export async function transformGoogleGenerateContent(
     }
   }
 
-  const historyPlan = options.collapseHistory === false
+  const plannedHistory = options.collapseHistory === false
     ? null
     : await planGoogleHistory(originalContents, modelName, options.reflow !== false);
+  const historyRenderLossy = Boolean(
+    plannedHistory
+      && options.requireLosslessRender
+      && plannedHistory.droppedChars > 0,
+  );
+  const historyPlan = historyRenderLossy ? null : plannedHistory;
   let contents = originalContents;
   if (historyPlan) {
     const historyParts: GooglePart[] = [
@@ -650,8 +677,18 @@ export async function transformGoogleGenerateContent(
   const hasToolCompression = toolResultPlan.images.length > 0;
 
   if (!hasStaticCompression && !hasHistoryCompression && !hasToolCompression) {
-    if (!combinedRaw) {
+    if (historyRenderLossy || (options.requireLosslessRender && staticDroppedChars > 0)) {
+      info.reason = 'render_lossy';
+      info.droppedChars = staticDroppedChars + (plannedHistory?.droppedChars ?? 0);
+      const combinedDropped = new Map<number, number>(staticDroppedCodepoints);
+      for (const [codepoint, count] of plannedHistory?.droppedCodepoints ?? []) {
+        combinedDropped.set(codepoint, (combinedDropped.get(codepoint) ?? 0) + count);
+      }
+      info.droppedCodepointsTop = droppedCodepointsTop(combinedDropped) ?? info.droppedCodepointsTop;
+    } else if (!combinedRaw) {
       info.reason = 'no_static_context';
+    } else if (!staticEligible) {
+      info.reason = 'below_threshold';
     } else if (!staticProfitable) {
       info.reason = 'not_profitable';
     }
@@ -691,6 +728,11 @@ export async function transformGoogleGenerateContent(
   };
 
   const effectiveStaticImages = hasStaticCompression ? staticImages : [];
+  if (hasStaticCompression && staticDroppedChars > 0) {
+    info.droppedChars = (info.droppedChars ?? 0) + staticDroppedChars;
+    info.droppedCodepointsTop = droppedCodepointsTop(staticDroppedCodepoints)
+      ?? info.droppedCodepointsTop;
+  }
   info.compressed = true;
   info.imageCount = effectiveStaticImages.length;
   info.imageBytes = effectiveStaticImages.reduce((acc, img) => acc + img.png.byteLength, 0);
