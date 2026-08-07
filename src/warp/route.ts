@@ -45,7 +45,9 @@ function quoteMeta(s: string): string {
 
 /**
  * Turn a host/path glob into an anchored regexp. "*" spans anything including
- * "/", matching wardex's semantics.
+ * "/", matching wardex's semantics. Route matching is case-insensitive in
+ * practice: patterns are normalized to lowercase here and candidates are
+ * normalized in matchRoute(), while rewriteUrl() preserves the original URI.
  */
 function compilePattern(pattern: string): RegExp {
   const withPath = pattern.includes('/') ? pattern : `${pattern}/*`;
@@ -112,12 +114,15 @@ function stripPort(hostPort: string): string {
  *
  * `hostPort` carries the port so a pattern may select on it; patterns that name
  * no port are matched against the bare host and so still match any port.
+ * Matching is normalized to lowercase to agree with parseRoute's normalized
+ * pattern while the untouched original path is still used by rewriteUrl().
  */
 export function matchRoute(routes: readonly Route[], hostPort: string, path: string): Route | null {
   const lower = hostPort.toLowerCase();
   const bare = stripPort(lower);
+  const normalizedPath = path.toLowerCase();
   for (const route of routes) {
-    if (route.re.test((route.hasPort ? lower : bare) + path)) return route;
+    if (route.re.test((route.hasPort ? lower : bare) + normalizedPath)) return route;
   }
   return null;
 }

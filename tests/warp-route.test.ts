@@ -19,6 +19,17 @@ describe('warp route port selection', () => {
     expect(hostCouldMatch(routes, '127.0.0.1:47821')).toBe(false);
   });
 
+  it('matches camel-case action paths without changing the URI that gets rewritten', () => {
+    const route = parseRoute(
+      `generativelanguage.googleapis.com/v1beta/models/*:streamGenerateContent=${front}/providers/google`,
+    );
+    const original = '/v1beta/models/gemini-3.6-flash:streamGenerateContent';
+    expect(matchRoute([route], 'generativelanguage.googleapis.com:443', original)).toBe(route);
+    expect(rewriteUrl(route, `${original}?alt=sse`)).toBe(
+      `${front}/providers/google${original}?alt=sse`,
+    );
+  });
+
   it('preserves the path and query when rewriting', () => {
     const route = parseRoute(`127.0.0.1:8082/v1/*=${front}`);
     expect(rewriteUrl(route, '/v1/responses?stream=true')).toBe(
