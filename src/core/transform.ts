@@ -124,6 +124,10 @@ export interface TransformOptions {
    *  glyph-fill). ON by default (98.95% char accuracy at L1 OCR eval, +1pp vs baseline).
    *  Hard newlines become visible ↵ glyphs — tell the model via system prompt. */
   reflow?: boolean;
+  /** When true, any renderer-known character loss makes the candidate ineligible.
+   *  Safe profiles use this for archival history so invisible/unsupported codepoints
+   *  never disappear merely because the image path was otherwise profitable. */
+  requireLosslessRender?: boolean;
   /** Caller fidelity hint: return `true` for a block that must stay as text (IDs,
    *  hashes, file paths — content where mis-OCR would be silent and wrong). Only
    *  consulted on per-block live-region paths (reminders, tool_results). A throwing
@@ -155,6 +159,7 @@ const DEFAULTS: Required<TransformOptions> = {
   priorWarmTokens: 0,
   priorWarmImageTokens: 0,
   reflow: true,
+  requireLosslessRender: false,
   keepSharp: () => false,
   emitRecoverable: false,
   // GPT-only knobs; the Anthropic transform ignores them but Required<> needs them.
@@ -751,6 +756,7 @@ export interface TransformInfo {
     | 'too_many_images'
     | 'render_empty'
     | 'over_budget'
+    | 'render_lossy'
     | 'collapsed';
   /** Token count of the pre-compression body from /v1/messages/count_tokens (free).
    *  Absent when probe failed — event excluded from savings rollup. */
@@ -1884,11 +1890,20 @@ async function runHistoryCollapseAndFinalize(
         minFreezeStep: tuning.minFreezeStep,
       },
     );
-    recordFreezeStep(info.firstUserSha8, histInfo.freezeStep);
-    if (histInfo.freezeStep !== undefined) info.historyFreezeStep = histInfo.freezeStep;
-    if (histInfo.budgetTrimmed) info.historyBudgetTrimmed = true;
-    if (tuning.packFill) info.historyPackFill = true;
-    if (histInfo.collapsedTurns > 0) {
+    const renderLossy = o.requireLosslessRender && histInfo.droppedChars > 0;
+    if (!renderLossy) {
+      recordFreezeStep(info.firstUserSha8, histInfo.freezeStep);
+      if (histInfo.freezeStep !== undefined) info.historyFreezeStep = histInfo.freezeStep;
+      if (histInfo.budgetTrimmed) info.historyBudgetTrimmed = true;
+      if (tuning.packFill) info.historyPackFill = true;
+    }
+    if (renderLossy) {
+      info.historyReason = 'render_lossy';
+      info.droppedChars = (info.droppedChars ?? 0) + histInfo.droppedChars;
+      for (const [cp, n] of histInfo.droppedCodepoints) {
+        droppedCodepoints.set(cp, (droppedCodepoints.get(cp) ?? 0) + n);
+      }
+    } else if (histInfo.collapsedTurns > 0) {
       req.messages = newMessages;
       info.collapsedTurns = histInfo.collapsedTurns;
       info.collapsedChars = histInfo.collapsedChars;
@@ -2653,11 +2668,20 @@ export async function transformRequest(
         minFreezeStep: tuning.minFreezeStep,
       },
     );
-    recordFreezeStep(info.firstUserSha8, histInfo.freezeStep);
-    if (histInfo.freezeStep !== undefined) info.historyFreezeStep = histInfo.freezeStep;
-    if (histInfo.budgetTrimmed) info.historyBudgetTrimmed = true;
-    if (tuning.packFill) info.historyPackFill = true;
-    if (histInfo.collapsedTurns > 0) {
+    const renderLossy = o.requireLosslessRender && histInfo.droppedChars > 0;
+    if (!renderLossy) {
+      recordFreezeStep(info.firstUserSha8, histInfo.freezeStep);
+      if (histInfo.freezeStep !== undefined) info.historyFreezeStep = histInfo.freezeStep;
+      if (histInfo.budgetTrimmed) info.historyBudgetTrimmed = true;
+      if (tuning.packFill) info.historyPackFill = true;
+    }
+    if (renderLossy) {
+      info.historyReason = 'render_lossy';
+      info.droppedChars = (info.droppedChars ?? 0) + histInfo.droppedChars;
+      for (const [cp, n] of histInfo.droppedCodepoints) {
+        droppedCodepoints.set(cp, (droppedCodepoints.get(cp) ?? 0) + n);
+      }
+    } else if (histInfo.collapsedTurns > 0) {
       req.messages = newMessages;
       info.collapsedTurns = histInfo.collapsedTurns;
       info.collapsedChars = histInfo.collapsedChars;
