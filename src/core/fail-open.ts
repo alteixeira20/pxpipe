@@ -1,4 +1,8 @@
 import { createProxy, type ProxyConfig, type ProxyEvent } from './proxy.js';
+import {
+  setCompressionSafetyScope,
+  type PxpipeSafetyScope,
+} from './applicability.js';
 
 const TRANSFORM_FAILURE_STATUS = 502;
 const TRANSFORM_FAILURE_MARKER = 'pxpipe transform failed';
@@ -36,6 +40,44 @@ function isTransformFailureEvent(event: ProxyEvent): boolean {
     && event.error.startsWith('transform_error:');
 }
 
+function parseSafetyScope(raw: string | undefined): PxpipeSafetyScope | undefined {
+  const value = (raw ?? '').trim().toLowerCase();
+  if (!value) return undefined;
+  if (value === 'safe' || value === 'coding' || value === 'coding-safe') return 'coding-safe';
+  if (value === 'balanced') return 'balanced';
+  if (value === 'aggressive' || value === 'legacy') return 'aggressive';
+  if (value === 'off' || value === 'disabled' || value === 'passthrough') return 'passthrough';
+  return undefined;
+}
+
+/**
+ * Resolve semantic model-scope policy at the PRODUCT HOST boundary.
+ *
+ * Low-level `createProxy` retains its historical applicability semantics for SDK
+ * compatibility and tests. Node/Worker production hosts enter through this wrapper,
+ * so an unset profile means the new coding-safe default here. Explicit aggressive
+ * remains available for controlled evaluation.
+ */
+export function resolveHostedSafetyScope(config: ProxyConfig): PxpipeSafetyScope {
+  if (typeof process !== 'undefined') {
+    return parseSafetyScope(process.env?.PXPIPE_PROFILE) ?? 'coding-safe';
+  }
+
+  const transform = typeof config.transform === 'object' ? config.transform : undefined;
+  if (transform?.compress === false) return 'passthrough';
+  if (transform?.compressTools === true || transform?.compressToolResults === true) return 'aggressive';
+  if (
+    transform?.compressTools === false
+    && transform.compressToolResults === false
+    && transform.minCompressChars === Number.MAX_SAFE_INTEGER
+  ) {
+    return transform.historyAmortizationHorizon === 3 ? 'balanced' : 'coding-safe';
+  }
+  // A host using the reliability wrapper without declaring a policy gets the safe
+  // default. Hosts wanting legacy semantics can call createProxy directly.
+  return 'coding-safe';
+}
+
 /**
  * Node's CLI historically parsed PXPIPE_FEATHERLESS_TRANSFORM but did not pass the
  * result into ProxyConfig, which left provider mode at its implicit `auto` default.
@@ -52,26 +94,12 @@ export function resolveHostedFeatherlessMode(
 ): ProxyConfig['featherlessTransformMode'] {
   if (config.featherlessTransformMode !== undefined) return config.featherlessTransformMode;
 
-  if (typeof process !== 'undefined') {
-    const profile = (process.env?.PXPIPE_PROFILE ?? '').trim().toLowerCase();
-    const aggressive = profile === 'aggressive' || profile === 'legacy';
-    if (!aggressive) return 'off';
+  const scope = resolveHostedSafetyScope(config);
+  if (scope !== 'aggressive') return 'off';
 
+  if (typeof process !== 'undefined') {
     const requested = (process.env?.PXPIPE_FEATHERLESS_TRANSFORM ?? '').trim().toLowerCase();
     if (requested === 'off' || requested === 'auto' || requested === 'force') return requested;
-    return undefined;
-  }
-
-  // Worker/browser hosts have no process.env. The built-in safe profiles carry
-  // this unmistakable non-destructive shape. Custom hosts that want Featherless
-  // transformation should set featherlessTransformMode explicitly.
-  const transform = typeof config.transform === 'object' ? config.transform : undefined;
-  if (
-    transform?.compressTools === false
-    && transform.compressToolResults === false
-    && transform.minCompressChars === Number.MAX_SAFE_INTEGER
-  ) {
-    return 'off';
   }
   return undefined;
 }
@@ -112,6 +140,8 @@ export function createFailOpenProxy(
   config: ProxyConfig,
 ): ((request: Request) => Promise<Response>) {
   const observer = config.onRequest;
+  const safetyScope = resolveHostedSafetyScope(config);
+  setCompressionSafetyScope(safetyScope);
   const featherlessTransformMode = resolveHostedFeatherlessMode(config);
   const hostedConfig: ProxyConfig = {
     ...config,
