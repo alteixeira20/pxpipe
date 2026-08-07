@@ -5,10 +5,14 @@ import {
   buildAgyEnvironment,
   classifyAgyFailure,
   findExecutable,
-  writeAgyCooldown,
   type AgyFailure,
   type AgyFailureKind,
 } from './agy.js';
+import {
+  extractAgyModel,
+  readAgyCooldown,
+  writeAgyCooldownForModel,
+} from './agy-quota.js';
 
 export interface AgyExecutionLimits {
   maxCalls: number;
@@ -207,6 +211,17 @@ function killProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
   child.kill(signal);
 }
 
+/** Record a batch failure under the exact model selected by the AGY arguments.
+ * Authentication failures remain auth-context-wide inside agy-quota.ts; quota and
+ * rate limits stay model-local so one exhausted Claude pool never blocks Gemini. */
+export function recordAgyBatchCooldown(
+  failure: AgyFailure | null,
+  args: readonly string[],
+): void {
+  if (!failure) return;
+  writeAgyCooldownForModel(failure, extractAgyModel(args));
+}
+
 async function executeCall(input: {
   binary: string;
   args: string[];
@@ -266,7 +281,7 @@ async function executeCall(input: {
         timedOut,
         structuredExpected: expectsStructuredOutput(input.args),
       });
-  if (failure) writeAgyCooldown(failure);
+  recordAgyBatchCooldown(failure, input.args);
 
   return {
     index: input.index,
@@ -282,6 +297,22 @@ async function executeCall(input: {
 export async function runAgyBatch(options: AgyBatchOptions, signal = new AbortController().signal): Promise<AgyBatchSummary> {
   const binary = findExecutable('agy');
   if (!binary) throw new Error('AGY executable not found on PATH');
+
+  // Honour any already-observed model/auth cooldown before spending a single
+  // subprocess. This uses the same auth-context+model key as doctor and the named
+  // wrapper; legacy global cooldown state is deliberately ignored.
+  const model = extractAgyModel(options.agyArgs);
+  const cooldown = readAgyCooldown(model);
+  if (cooldown) {
+    return {
+      started: 0,
+      completed: 0,
+      succeeded: 0,
+      failed: 0,
+      stoppedBy: cooldown.failure,
+      results: [],
+    };
+  }
 
   const prompts = options.prompts.slice(0, options.limits.maxCalls);
   const startedAt = Date.now();
