@@ -203,10 +203,11 @@ set -eu
 printf '%s\\n' "$1" >> "$AGY_FAKE_CALLS"
 case "$1" in
   --version)
-    cat "$AGY_FAKE_VERSION"
+    IFS= read -r current < "$AGY_FAKE_VERSION"
+    printf '%s\\n' "$current"
     ;;
   models)
-    current=$(cat "$AGY_FAKE_VERSION")
+    IFS= read -r current < "$AGY_FAKE_VERSION"
     if [[ "$current" == '1.1.10' ]]; then
       printf '%s\\n' '1.1.11' > "$AGY_FAKE_VERSION"
       printf '%s\\n' 'gemini-3.6-flash-high' 'claude-sonnet-4-6'
