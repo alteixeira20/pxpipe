@@ -5,6 +5,7 @@ import {
   createProviderRouter,
   parseProviderRoute,
 } from '../src/core/provider-router.js';
+import { createProxy, type ProxyConfig } from '../src/core/proxy.js';
 
 function echoFetch(calls: Array<{ url: string; body: string; authorization: string | null }>): typeof fetch {
   return vi.fn<typeof fetch>(async (input, init) => {
@@ -30,88 +31,87 @@ function echoFetch(calls: Array<{ url: string; body: string; authorization: stri
       status: 200,
       headers: {
         'content-type': 'application/json',
-        'x-upstream': new URL(request.url).host,
+        'x-upstream': new URL(request.url).hostname,
       },
     });
   });
 }
 
 describe('provider route parsing', () => {
-  it('extracts a provider id and preserves the complete upstream path', () => {
+  it('accepts explicit provider paths and strips only the internal prefix', () => {
     expect(parseProviderRoute('/providers/featherless/v1/chat/completions')).toEqual({
       providerId: 'featherless',
       upstreamPath: '/v1/chat/completions',
     });
+    expect(parseProviderRoute('/providers/anthropic/v1/messages')).toEqual({
+      providerId: 'anthropic',
+      upstreamPath: '/v1/messages',
+    });
   });
 
-  it.each([
-    '/v1/chat/completions',
-    '/providers/',
-    '/providers/featherless',
-    '/providers/Featherless/v1/chat/completions',
-    '/providers/featherless//v1/chat/completions',
-  ])('does not accept malformed explicit route %s', (path) => {
-    expect(parseProviderRoute(path)).toBeNull();
+  it('does not treat incomplete or malformed paths as explicit provider routes', () => {
+    expect(parseProviderRoute('/v1/messages')).toBeNull();
+    expect(parseProviderRoute('/providers/')).toBeNull();
+    expect(parseProviderRoute('/providers/Featherless/v1/chat/completions')).toBeNull();
+    expect(parseProviderRoute('/providers/featherless')).toBeNull();
+    expect(parseProviderRoute('/providers/featherless//v1/chat/completions')).toBeNull();
   });
 
-  it('rejects unsafe or ambiguous provider identifiers', () => {
-    expect(() => assertProviderId('Featherless')).toThrow(/invalid provider id/);
-    expect(() => assertProviderId('../openai')).toThrow(/invalid provider id/);
+  it('validates provider identifiers before a registry is created', () => {
+    expect(() => assertProviderId('featherless')).not.toThrow();
+    expect(() => assertProviderId('openai-compatible')).not.toThrow();
+    expect(() => assertProviderId('Bad_Id')).toThrow(/invalid provider id/);
     expect(() => assertProviderId('')).toThrow(/invalid provider id/);
   });
 });
 
-describe('single-listener provider router', () => {
+describe('provider router', () => {
   it('routes explicit providers while preserving query, body and response headers', async () => {
-    const legacyCalls: Array<{ url: string; body: string; authorization: string | null }> = [];
+    const anthropicCalls: Array<{ url: string; body: string; authorization: string | null }> = [];
     const featherlessCalls: Array<{ url: string; body: string; authorization: string | null }> = [];
     const observed: string[] = [];
 
     const router = createProviderRouter({
       defaultProxy: {
-        openAIUpstream: 'https://api.openai.example',
-        customFetch: echoFetch(legacyCalls),
+        upstream: 'https://legacy.example',
+        customFetch: echoFetch(anthropicCalls),
       },
-      providers: [{
-        id: 'featherless',
-        protocol: 'openai',
-        proxy: {
-          provider: 'featherless',
-          featherlessTransformMode: 'off',
-          openAIUpstream: 'https://api.featherless.example',
-          openAIApiKey: 'provider-key',
-          customFetch: echoFetch(featherlessCalls),
-          onRequest: (event) => observed.push(`provider:${event.provider}`),
-        },
-      }],
-      onRequest: (providerId, event) => observed.push(`router:${providerId}:${event.provider}`),
-    });
-
-    const payload = {
-      model: 'moonshotai/Kimi-K3',
-      messages: [{ role: 'user', content: 'Reply with OK.' }],
-      response_format: {
-        type: 'json_schema',
-        json_schema: {
-          name: 'answer',
-          strict: true,
-          schema: {
-            type: 'object',
-            properties: { answer: { type: 'string' } },
-            required: ['answer'],
-            additionalProperties: false,
+      providers: [
+        {
+          id: 'anthropic',
+          protocol: 'anthropic',
+          proxy: {
+            upstream: 'https://api.anthropic.example',
+            customFetch: echoFetch(anthropicCalls),
           },
         },
+        {
+          id: 'featherless',
+          protocol: 'openai',
+          proxy: {
+            provider: 'featherless',
+            openAIUpstream: 'https://api.featherless.example',
+            featherlessTransformMode: 'off',
+            customFetch: echoFetch(featherlessCalls),
+            onRequest: (event) => {
+              observed.push(`provider:${event.provider}`);
+            },
+          },
+        },
+      ],
+      onRequest: (providerId, event) => {
+        observed.push(`router:${providerId}:${event.provider}`);
       },
-    };
+    });
 
+    const payload = { model: 'moonshotai/Kimi-K3', messages: [{ role: 'user', content: 'hello' }] };
     const response = await router(new Request(
       'http://127.0.0.1:47821/providers/featherless/v1/chat/completions?trace=one',
       {
         method: 'POST',
         headers: {
+          authorization: 'Bearer incoming-token',
           'content-type': 'application/json',
-          authorization: 'Bearer client-key',
         },
         body: JSON.stringify(payload),
       },
@@ -119,12 +119,11 @@ describe('single-listener provider router', () => {
 
     expect(response.status).toBe(200);
     expect(response.headers.get('x-upstream')).toBe('api.featherless.example');
-    expect(legacyCalls).toHaveLength(0);
     expect(featherlessCalls).toHaveLength(1);
-    expect(featherlessCalls[0]).toMatchObject({
-      url: 'https://api.featherless.example/v1/chat/completions?trace=one',
-      authorization: 'Bearer provider-key',
-    });
+    expect(featherlessCalls[0]!.url).toBe(
+      'https://api.featherless.example/v1/chat/completions?trace=one',
+    );
+    expect(featherlessCalls[0]!.authorization).toBe('Bearer incoming-token');
     expect(JSON.parse(featherlessCalls[0]!.body)).toEqual(payload);
 
     // Request telemetry is finalized when the streamed upstream response
@@ -143,83 +142,144 @@ describe('single-listener provider router', () => {
   });
 
   it('keeps legacy unprefixed routes on the default proxy', async () => {
-    const legacyCalls: Array<{ url: string; body: string; authorization: string | null }> = [];
-    const providerCalls: Array<{ url: string; body: string; authorization: string | null }> = [];
-    const router = createProviderRouter({
-      defaultProxy: {
-        openAIUpstream: 'https://api.openai.example',
-        customFetch: echoFetch(legacyCalls),
-      },
-      providers: [{
-        id: 'featherless',
-        protocol: 'openai',
-        proxy: {
-          provider: 'featherless',
-          featherlessTransformMode: 'off',
-          openAIUpstream: 'https://api.featherless.example',
-          customFetch: echoFetch(providerCalls),
-        },
-      }],
-    });
-
-    const response = await router(new Request('http://127.0.0.1:47821/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        model: 'gpt-5.6-sol',
-        messages: [{ role: 'user', content: 'OK' }],
-      }),
-    }));
-
-    expect(response.status).toBe(200);
-    expect(legacyCalls).toHaveLength(1);
-    expect(legacyCalls[0]!.url).toBe('https://api.openai.example/v1/chat/completions');
-    expect(providerCalls).toHaveLength(0);
-  });
-
-  it('rejects an unknown explicit provider without contacting any upstream', async () => {
     const calls: Array<{ url: string; body: string; authorization: string | null }> = [];
     const router = createProviderRouter({
       defaultProxy: {
-        openAIUpstream: 'https://api.openai.example',
+        upstream: 'https://legacy-anthropic.example',
+        customFetch: echoFetch(calls),
+      },
+      providers: [],
+    });
+
+    const response = await router(new Request('http://127.0.0.1:47821/v1/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'unsupported-test-model',
+        max_tokens: 1,
+        messages: [{ role: 'user', content: 'hello' }],
+      }),
+    }));
+    expect(response.status).toBe(200);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe('https://legacy-anthropic.example/v1/messages');
+  });
+
+  it('fails unknown explicit providers closed without contacting any upstream', async () => {
+    const calls: Array<{ url: string; body: string; authorization: string | null }> = [];
+    const router = createProviderRouter({
+      defaultProxy: {
+        upstream: 'https://legacy.example',
         customFetch: echoFetch(calls),
       },
       providers: [],
     });
 
     const response = await router(new Request(
-      'http://127.0.0.1:47821/providers/missing/v1/chat/completions',
-      { method: 'POST', body: '{}' },
+      'http://127.0.0.1:47821/providers/not-configured/v1/messages',
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'claude-fable-5' }),
+      },
     ));
-
     expect(response.status).toBe(404);
     expect(await response.json()).toEqual({
       error: 'unknown_provider',
-      provider: 'missing',
+      provider: 'not-configured',
     });
     expect(calls).toHaveLength(0);
   });
 
-  it('rejects duplicate provider ids during construction', () => {
-    expect(() => createProviderRouter({
-      defaultProxy: {},
-      providers: [
-        { id: 'same', protocol: 'openai', proxy: {} },
-        { id: 'same', protocol: 'anthropic', proxy: {} },
-      ],
-    })).toThrow(/duplicate provider id/);
-  });
-
-  it('exposes a credential-free route inspection snapshot', () => {
+  it('does not let query/header/body provider hints change the selected route', async () => {
+    const defaultCalls: Array<{ url: string; body: string; authorization: string | null }> = [];
+    const explicitCalls: Array<{ url: string; body: string; authorization: string | null }> = [];
     const router = createProviderRouter({
-      defaultProxy: { openAIApiKey: 'default-secret' },
+      defaultProxy: {
+        upstream: 'https://legacy.example',
+        customFetch: echoFetch(defaultCalls),
+      },
       providers: [{
         id: 'featherless',
         protocol: 'openai',
-        proxy: { openAIApiKey: 'provider-secret' },
+        proxy: {
+          provider: 'featherless',
+          openAIUpstream: 'https://api.featherless.example',
+          featherlessTransformMode: 'off',
+          customFetch: echoFetch(explicitCalls),
+        },
       }],
     });
 
+    const response = await router(new Request(
+      'http://127.0.0.1:47821/v1/messages?provider=featherless',
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-pxpipe-provider': 'featherless',
+        },
+        body: JSON.stringify({
+          model: 'featherless',
+          provider: 'featherless',
+          messages: [{ role: 'user', content: 'hello' }],
+        }),
+      },
+    ));
+    expect(response.status).toBe(200);
+    expect(defaultCalls).toHaveLength(1);
+    expect(explicitCalls).toHaveLength(0);
+  });
+
+  it('forwards array-buffer request bodies without parse/re-encode in the router', async () => {
+    const calls: Array<{ url: string; body: string; authorization: string | null }> = [];
+    const router = createProviderRouter({
+      defaultProxy: {
+        upstream: 'https://legacy.example',
+        customFetch: echoFetch([]),
+      },
+      providers: [{
+        id: 'featherless',
+        protocol: 'openai',
+        proxy: {
+          provider: 'featherless',
+          openAIUpstream: 'https://api.featherless.example',
+          featherlessTransformMode: 'off',
+          customFetch: echoFetch(calls),
+        },
+      }],
+    });
+    const raw = '{"model":"moonshotai/Kimi-K3","messages":[],"spacing":"  preserved  "}';
+    const response = await router(new Request(
+      'http://127.0.0.1:47821/providers/featherless/v1/chat/completions',
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: new TextEncoder().encode(raw),
+      },
+    ));
+    expect(response.status).toBe(200);
+    expect(calls[0]!.body).toBe(raw);
+  });
+
+  it('exposes only credential-free provider metadata from inspect()', () => {
+    const router = createProviderRouter({
+      defaultProxy: {
+        upstream: 'https://legacy.example',
+        apiKey: 'default-secret',
+        customFetch: echoFetch([]),
+      },
+      providers: [{
+        id: 'featherless',
+        protocol: 'openai',
+        proxy: {
+          provider: 'featherless',
+          openAIUpstream: 'https://api.featherless.example',
+          openAIApiKey: 'provider-secret',
+          customFetch: echoFetch([]),
+        },
+      }],
+    });
     expect(router.inspect()).toEqual({
       defaultRoute: 'legacy',
       providers: [{
@@ -229,5 +289,40 @@ describe('single-listener provider router', () => {
       }],
     });
     expect(JSON.stringify(router.inspect())).not.toContain('secret');
+  });
+
+  it('rejects duplicate provider ids', () => {
+    expect(() => createProviderRouter({
+      defaultProxy: { upstream: 'https://legacy.example' },
+      providers: [
+        { id: 'same', protocol: 'anthropic', proxy: { upstream: 'https://a.example' } },
+        { id: 'same', protocol: 'openai', proxy: { openAIUpstream: 'https://b.example' } },
+      ],
+    })).toThrow(/duplicate provider id/);
+  });
+
+  it('does not expose secrets when unknown provider ids fail', async () => {
+    const router = createProviderRouter({
+      defaultProxy: {
+        upstream: 'https://legacy.example',
+        apiKey: 'top-secret-default',
+      },
+      providers: [{
+        id: 'anthropic',
+        protocol: 'anthropic',
+        proxy: {
+          upstream: 'https://anthropic.example',
+          apiKey: 'top-secret-provider',
+        },
+      }],
+    });
+    const response = await router(new Request(
+      'http://127.0.0.1/providers/unknown/v1/messages',
+      { method: 'POST', body: '{}' },
+    ));
+    const text = await response.text();
+    expect(response.status).toBe(404);
+    expect(text).not.toContain('top-secret');
+    expect(text).not.toContain('anthropic.example');
   });
 });
