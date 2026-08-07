@@ -191,7 +191,10 @@ export default {
         tracker.emit(toTrackEvent(e));
       },
     };
-    const handle = createFailOpenProxy(config);
+    // Pass the already-resolved Worker policy explicitly. Vitest and some
+    // bundlers provide a process shim; relying on process.env here would
+    // silently downgrade an aggressive Worker request to Node's safe default.
+    const handle = createFailOpenProxy(config, { safetyScope: profile.name });
     return handle(req);
   },
 };
