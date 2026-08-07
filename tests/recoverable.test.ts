@@ -142,13 +142,15 @@ describe('emitRecoverable recovery channel', () => {
   });
 
   it('is reachable through the public library wrapper', async () => {
+    // Recoverable entries only exist for content that was intentionally imaged,
+    // so this compatibility test opts into the experimental lossy profile.
     const result = await transformAnthropicMessages({
       body: makeReq(
         [{ type: 'tool_result', tool_use_id: 'toolu_a', content: BIG }],
         'claude-fable-5',
       ),
       model: 'claude-fable-5',
-      options: { charsPerToken: 2, emitRecoverable: true },
+      options: { profile: 'aggressive', charsPerToken: 2, emitRecoverable: true },
     });
     expect(result.applied).toBe(true);
     const entry = (result.info.recoverable ?? []).find((r) => r.kind === 'tool_result');
