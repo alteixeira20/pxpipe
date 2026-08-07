@@ -325,4 +325,43 @@ describe('provider router', () => {
     expect(text).not.toContain('top-secret');
     expect(text).not.toContain('anthropic.example');
   });
+
+  it('uses a host handler factory for legacy and explicit provider routes', async () => {
+    const built: string[] = [];
+    const factory = (proxy: ProxyConfig) => {
+      built.push(proxy.upstream ?? proxy.openAIUpstream ?? 'default');
+      const lowLevel = createProxy(proxy);
+      return (request: Request) => lowLevel(request);
+    };
+    const fetcher = vi.fn(async (request: Request | string | URL) => {
+      const url = typeof request === 'string' ? request : request instanceof URL ? request.toString() : request.url;
+      return new Response(JSON.stringify({ url }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    const router = createProviderRouter({
+      defaultProxy: { upstream: 'https://legacy.example', customFetch: fetcher as typeof fetch },
+      providers: [{
+        id: 'anthropic',
+        protocol: 'anthropic',
+        proxy: { upstream: 'https://anthropic.example', customFetch: fetcher as typeof fetch },
+      }],
+      handlerFactory: factory,
+    });
+
+    expect(built).toEqual(['https://legacy.example', 'https://anthropic.example']);
+    const legacy = await router(new Request('http://local/v1/messages', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'unsupported-test-model', messages: [] }),
+    }));
+    expect(legacy.status).toBe(200);
+    const explicit = await router(new Request('http://local/providers/anthropic/v1/messages', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'unsupported-test-model', messages: [] }),
+    }));
+    expect(explicit.status).toBe(200);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
 });
