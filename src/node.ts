@@ -16,6 +16,7 @@ import { isIP } from 'node:net';
 import { spawnSync } from 'node:child_process';
 import { parseGatewayHeaders, resolveUpstreams, type ProxyConfig } from './core/proxy.js';
 import { createFailOpenProxy } from './core/fail-open.js';
+import { createProviderRouter } from './core/provider-router.js';
 import {
   chatCompletionsUrl,
 } from './core/messages-chat-bridge.js';
@@ -51,6 +52,10 @@ interface RuntimeConfig {
   upstream: string;
   openAIUpstream: string;
   openAIApiKey?: string;
+  /** Dedicated upstreams for the single-listener explicit provider registry. */
+  featherlessUpstream: string;
+  featherlessApiKey?: string;
+  googleUpstream: string;
   /** Independent Cloudflare OpenAI-compatible endpoint. */
   cloudflareUpstream?: string;
   cloudflareApiKey?: string;
@@ -177,6 +182,10 @@ function parseCli(argv: string[]): RuntimeConfig {
     upstream: process.env.ANTHROPIC_UPSTREAM ?? sharedUpstream ?? 'https://api.anthropic.com',
     openAIUpstream: process.env.OPENAI_UPSTREAM ?? sharedUpstream ?? 'https://api.openai.com',
     openAIApiKey: process.env.OPENAI_API_KEY,
+    featherlessUpstream: process.env.FEATHERLESS_UPSTREAM ?? 'https://api.featherless.ai',
+    featherlessApiKey: process.env.FEATHERLESS_API_KEY
+      ?? (process.env.PXPIPE_PROVIDER === 'featherless' ? process.env.OPENAI_API_KEY : undefined),
+    googleUpstream: process.env.GOOGLE_UPSTREAM ?? 'https://generativelanguage.googleapis.com',
     cloudflareUpstream,
     cloudflareApiKey: cfToken,
     openAIModels: parseModels(process.env.OPENAI_MODELS),
@@ -1307,7 +1316,71 @@ async function main(): Promise<void> {
       tracker.emit(toTrackEvent(e));
     },
   };
-  const handle = createFailOpenProxy(config);
+  // One persistent listener now owns legacy routes and explicit provider routes.
+  // Each provider still gets an isolated createProxy instance (capability cache,
+  // circuit breaker and upstream config), but every instance is wrapped in the
+  // same transform-only fail-open policy before the router sees it.
+  const providerRouter = createProviderRouter({
+    defaultProxy: config,
+    handlerFactory: createFailOpenProxy,
+    providers: [
+      {
+        id: 'anthropic',
+        protocol: 'anthropic',
+        proxy: {
+          ...config,
+          provider: undefined,
+          upstream: opts.upstream,
+          openAIModels: [],
+          cloudflareModels: [],
+        },
+      },
+      {
+        id: 'openai',
+        protocol: 'openai',
+        proxy: {
+          ...config,
+          provider: undefined,
+          upstream: opts.upstream,
+          apiKey: undefined,
+          authToken: undefined,
+          openAIUpstream: opts.openAIUpstream,
+          openAIApiKey: opts.openAIApiKey,
+          cloudflareModels: [],
+        },
+      },
+      {
+        id: 'featherless',
+        protocol: 'openai',
+        proxy: {
+          ...config,
+          provider: 'featherless',
+          upstream: opts.upstream,
+          apiKey: undefined,
+          authToken: undefined,
+          openAIUpstream: opts.featherlessUpstream,
+          openAIApiKey: opts.featherlessApiKey,
+          openAIModels: undefined,
+          cloudflareModels: [],
+        },
+      },
+      {
+        id: 'google',
+        protocol: 'google',
+        proxy: {
+          ...config,
+          provider: undefined,
+          upstream: opts.googleUpstream,
+          apiKey: undefined,
+          authToken: undefined,
+          openAIApiKey: undefined,
+          openAIModels: [],
+          cloudflareModels: [],
+        },
+      },
+    ],
+  });
+  const handle = providerRouter;
 
   const server = createServer((req, res) => {
     Promise.resolve()
@@ -1352,6 +1425,11 @@ async function main(): Promise<void> {
     const routes = resolveUpstreams(config);
     console.log(`[pxpipe] anthropic upstream → ${routes.anthropic}`);
     console.log(`[pxpipe] openai upstream → ${routes.openai}`);
+    console.log(`[pxpipe] featherless provider route → ${opts.featherlessUpstream}`);
+    console.log(`[pxpipe] google provider route → ${opts.googleUpstream}`);
+    console.log(
+      `[pxpipe] provider routes → ${providerRouter.inspect().providers.map((provider) => provider.prefix).join(', ')}`,
+    );
     if (opts.cloudflareUpstream !== undefined) {
       console.log(
         `[pxpipe] cloudflare upstream → ${chatCompletionsUrl(opts.cloudflareUpstream)} ` +
