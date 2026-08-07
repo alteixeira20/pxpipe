@@ -11,10 +11,12 @@
  * Config lives in wrangler.toml.
  */
 
-import { createProxy, type ProxyConfig } from './core/proxy.js';
+import { type ProxyConfig } from './core/proxy.js';
 import type { TransformOptions } from './core/transform.js';
+import { createFailOpenProxy } from './core/fail-open.js';
+import { resolveCompressionProfile } from './core/safety-policy.js';
 import { toTrackEvent, JsonLogTracker, noopTracker, type Tracker } from './core/tracker.js';
-import { setAllowedModelBases } from './core/applicability.js';
+import { setAllowedModelBases, setCompressionSafetyScope } from './core/applicability.js';
 
 export interface Env {
   /** Optional single upstream base for every API family. Family-specific env vars override it. */
@@ -29,7 +31,11 @@ export interface Env {
   CLOUDFLARE_MODELS?: string;
   CLOUDFLARE_ACCOUNT_ID?: string;
   CLOUDFLARE_API_TOKEN?: string;
+  /** Semantic compression policy. Defaults to coding-safe. */
+  PXPIPE_PROFILE?: string;
   COMPRESS?: string;
+  /** Legacy aggressive-mode tuning knobs. Ignored by coding-safe/balanced so a
+   * deployment cannot accidentally weaken the semantic safety boundary. */
   COMPRESS_TOOLS?: string;
   COMPRESS_TOOL_RESULTS?: string;
   MIN_COMPRESS_CHARS?: string;
@@ -69,6 +75,11 @@ const truthy = (v: string | undefined, fallback: boolean): boolean =>
 
 export default {
   async fetch(req: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
+    const profile = resolveCompressionProfile(env.PXPIPE_PROFILE);
+    // Workers do not have process.env, so explicitly install the host safety scope
+    // before model applicability is checked. Safe/balanced can never be weakened
+    // by a stale PXPIPE_MODELS setting; aggressive remains an explicit opt-in.
+    setCompressionSafetyScope(profile.name);
     const configuredModels = env.PXPIPE_MODELS?.trim();
     setAllowedModelBases(
       configuredModels === undefined || configuredModels === ''
@@ -106,18 +117,30 @@ export default {
     }
 
     const transform: TransformOptions = {
-      compress: truthy(env.COMPRESS, true),
-      compressTools: truthy(env.COMPRESS_TOOLS, true),
-      compressToolResults: truthy(env.COMPRESS_TOOL_RESULTS, true),
-      minCompressChars: env.MIN_COMPRESS_CHARS ? Number(env.MIN_COMPRESS_CHARS) : 2000,
-      // No floors — the content-aware `isCompressionProfitable()` gate
-      // decides per-block based on actual pixel cost vs text cost. Host
-      // can still set a floor via env if they want observability buckets
-      // (e.g. MIN_TOOL_RESULT_CHARS=200 to skip absurdly small dumps).
-      minToolResultChars: env.MIN_TOOL_RESULT_CHARS ? Number(env.MIN_TOOL_RESULT_CHARS) : 0,
-      // Omit by default so OpenAI-shaped requests use their exact model profile;
-      // COLS remains an explicit operator override for every family.
+      ...profile.transform,
+      // Global COMPRESS remains a one-way emergency kill switch. It cannot turn
+      // compression back on when the selected profile is passthrough.
+      compress: (profile.transform.compress ?? true) && truthy(env.COMPRESS, true),
+      // Geometry is not a semantic-risk switch and remains safe to override.
       ...(env.COLS ? { cols: Number(env.COLS) } : {}),
+      // Legacy fine-grained imaging controls are accepted only under the explicit
+      // aggressive profile. Safe profiles cannot be weakened accidentally by old
+      // wrangler variables left behind from a previous deployment.
+      ...(profile.name === 'aggressive'
+        ? {
+            compressTools: truthy(env.COMPRESS_TOOLS, profile.transform.compressTools ?? true),
+            compressToolResults: truthy(
+              env.COMPRESS_TOOL_RESULTS,
+              profile.transform.compressToolResults ?? true,
+            ),
+            minCompressChars: env.MIN_COMPRESS_CHARS
+              ? Number(env.MIN_COMPRESS_CHARS)
+              : profile.transform.minCompressChars,
+            minToolResultChars: env.MIN_TOOL_RESULT_CHARS
+              ? Number(env.MIN_TOOL_RESULT_CHARS)
+              : profile.transform.minToolResultChars,
+          }
+        : {}),
     };
     const trackingOn = truthy(env.PXPIPE_TRACK, true);
     // Workers Logs ingests stdout as separate log lines. Emit one JSON line
@@ -154,7 +177,10 @@ export default {
               : `skip(${e.info.reason})`
             : '';
         const cacheRead = e.usage?.cache_read_input_tokens ?? 0;
-        console.log(`${e.method} ${e.path} → ${e.status} (${e.durationMs}ms) ${tag} cache_read=${cacheRead}`);
+        console.log(
+          `${e.method} ${e.path} → ${e.status} (${e.durationMs}ms) ` +
+          `profile=${profile.name} ${tag} cache_read=${cacheRead}`,
+        );
 
         if (e.info?.unknownStaticTags && e.info.unknownStaticTags.length > 0) {
           console.warn(
@@ -165,7 +191,10 @@ export default {
         tracker.emit(toTrackEvent(e));
       },
     };
-    const handle = createProxy(config);
+    // Pass the already-resolved Worker policy explicitly. Vitest and some
+    // bundlers provide a process shim; relying on process.env here would
+    // silently downgrade an aggressive Worker request to Node's safe default.
+    const handle = createFailOpenProxy(config, { safetyScope: profile.name });
     return handle(req);
   },
 };
