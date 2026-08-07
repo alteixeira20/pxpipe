@@ -259,20 +259,19 @@ AGY quota/rate cooldowns are scoped by authentication context and selected model
 
 Compression through AGY still requires a route for the actual inference endpoint; without one, the wrapper simply forwards AGY execution and does not claim token compression.
 
-## Offline export
+## Offline export (no proxy)
 
-The renderer is also available without proxying an agent:
+Offline export is an explicit/manual image workflow and is independent of the `coding-safe` proxy default. It lets you deliberately render reference material without running the proxy.
 
 ```bash
 pxpipe export src/
-pxpipe export --git
-pxpipe export --diff HEAD~3
 cat large-reference.txt | pxpipe export --stdin
+pxpipe export --git
 ```
 
-Each run writes a private `pxpipe-export-XXXXXX/` directory containing rendered `page-*.png` files, a factsheet, manifest, and prompt text.
+Each run writes a private `pxpipe-export-XXXXXX/` directory containing `page-*.png`, `factsheet.txt`, `manifest.json`, and `prompt.txt`. Those pages can be uploaded to image-capable clients such as Cursor.
 
-Offline export is intentionally user-directed. Unlike the coding-safe proxy policy, you are explicitly choosing what material to render.
+Offline export is intentionally user-directed and lossy. Source code and other byte-exact working state should remain native text in normal coding-agent sessions.
 
 ## Configuration
 
