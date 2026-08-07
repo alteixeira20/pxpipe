@@ -39,6 +39,8 @@ export interface AgyModelDiscoveryResult {
   source: 'agy' | 'cache';
   cachePath: string;
   catalog: AgyModelCatalog;
+  /** True only when discovery failed and an older sanitized catalog was retained. */
+  stale?: boolean;
 }
 
 export interface DiscoverAgyModelsOptions {
@@ -49,18 +51,75 @@ export interface DiscoverAgyModelsOptions {
   timeoutMs?: number;
 }
 
+interface AgyCapture {
+  stdout: string;
+  stderr: string;
+}
+
+interface AgyBinaryIdentity {
+  binaryPath: string;
+  binaryVersion: string;
+  binaryMtimeMs: number;
+}
+
 const CATALOG_VERSION = 1;
 const DEFAULT_CACHE_PATH = join(homedir(), '.cache', 'pxpipe', 'agy-models.json');
 const CACHE_TTL_MS = 5 * 60_000;
 const MAX_MODELS = 1_000;
 const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/;
+const ANSI_ESCAPE = /\x1B\[[0-?]*[ -/]*[@-~]/g;
+const KNOWN_MODEL_TOKEN = /(?:claude-[A-Za-z0-9._:/-]+|gemini-[A-Za-z0-9._:/-]+|gpt[-_][A-Za-z0-9._:/-]+|o\d(?:-[A-Za-z0-9._:/-]+)?)/gi;
+const VERSION_TOKEN = /\b\d+\.\d+\.\d+(?:[-+][A-Za-z0-9._-]+)?\b/;
 
+function cleanLine(raw: string): string {
+  return raw.replace(ANSI_ESCAPE, '').trim();
+}
+
+function addModel(unique: Set<string>, candidate: string): void {
+  const normalized = candidate.replace(/[),;]+$/g, '');
+  if (!MODEL_ID.test(normalized)) return;
+  unique.add(normalized);
+}
+
+/**
+ * Parse both the historical one-id-per-line format and newer human-formatted
+ * tables/bullets. Exact single-token lines retain unknown models; formatted
+ * lines only contribute recognized family-shaped ids so headings/warnings do
+ * not become fake model identifiers.
+ */
 export function parseAgyModelsOutput(output: string): string[] {
   const unique = new Set<string>();
   for (const raw of output.split(/\r?\n/)) {
-    const line = raw.trim();
-    if (!line || !MODEL_ID.test(line)) continue;
-    unique.add(line);
+    const line = cleanLine(raw);
+    if (!line) continue;
+
+    if (MODEL_ID.test(line)) {
+      addModel(unique, line);
+    } else {
+      for (const match of line.matchAll(KNOWN_MODEL_TOKEN)) {
+        addModel(unique, match[0]);
+        if (unique.size >= MAX_MODELS) break;
+      }
+    }
+
+    if (unique.size >= MAX_MODELS) break;
+  }
+  return [...unique];
+}
+
+/**
+ * AGY has historically emitted command help on stderr and may do the same for
+ * informational model listings. We inspect stderr in memory but only retain
+ * recognized model-shaped identifiers from it; raw stderr is never cached.
+ */
+export function parseAgyModelsStreams(stdout: string, stderr: string): string[] {
+  const unique = new Set(parseAgyModelsOutput(stdout));
+  for (const raw of stderr.split(/\r?\n/)) {
+    const line = cleanLine(raw);
+    for (const match of line.matchAll(KNOWN_MODEL_TOKEN)) {
+      addModel(unique, match[0]);
+      if (unique.size >= MAX_MODELS) break;
+    }
     if (unique.size >= MAX_MODELS) break;
   }
   return [...unique];
@@ -131,6 +190,19 @@ export function buildAgyModelCatalog(input: {
   };
 }
 
+function buildCatalogFromIds(
+  identity: AgyBinaryIdentity,
+  fetchedAt: number,
+  ids: readonly string[],
+): AgyModelCatalog {
+  return {
+    version: CATALOG_VERSION,
+    ...identity,
+    fetchedAt,
+    models: ids.slice(0, MAX_MODELS).map(classifyAgyModel),
+  };
+}
+
 function isDescriptor(value: unknown): value is AgyModelDescriptor {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const item = value as Partial<AgyModelDescriptor>;
@@ -172,11 +244,7 @@ export function parseAgyModelCatalog(text: string): AgyModelCatalog | null {
 
 export function isAgyModelCatalogFresh(
   catalog: AgyModelCatalog,
-  identity: {
-    binaryPath: string;
-    binaryVersion: string;
-    binaryMtimeMs: number;
-  },
+  identity: AgyBinaryIdentity,
   now = Date.now(),
 ): boolean {
   return catalog.binaryPath === identity.binaryPath
@@ -208,7 +276,7 @@ function runAgy(
   args: readonly string[],
   env: NodeJS.ProcessEnv,
   timeoutMs: number,
-): string {
+): AgyCapture {
   const result = spawnSync(binaryPath, [...args], {
     encoding: 'utf8',
     timeout: timeoutMs,
@@ -223,7 +291,47 @@ function runAgy(
     // details. Discovery diagnostics retain only the safe command and status.
     throw new Error(`AGY ${args.join(' ')} exited ${result.status}`);
   }
-  return String(result.stdout ?? '').trim();
+  return {
+    stdout: String(result.stdout ?? ''),
+    stderr: String(result.stderr ?? ''),
+  };
+}
+
+function parseVersion(capture: AgyCapture): string {
+  for (const text of [capture.stdout, capture.stderr]) {
+    const match = VERSION_TOKEN.exec(text);
+    if (match) return match[0];
+  }
+  throw new Error('AGY --version returned no parseable version');
+}
+
+function readIdentity(
+  binaryPath: string,
+  env: NodeJS.ProcessEnv,
+  timeoutMs: number,
+): AgyBinaryIdentity {
+  const version = parseVersion(runAgy(binaryPath, ['--version'], env, timeoutMs));
+  const binaryMtimeMs = existsSync(binaryPath) ? statSync(binaryPath).mtimeMs : 0;
+  return {
+    binaryPath,
+    binaryVersion: version,
+    binaryMtimeMs,
+  };
+}
+
+function sameIdentity(left: AgyBinaryIdentity, right: AgyBinaryIdentity): boolean {
+  return left.binaryPath === right.binaryPath
+    && left.binaryVersion === right.binaryVersion
+    && left.binaryMtimeMs === right.binaryMtimeMs;
+}
+
+function staleFallback(
+  cached: AgyModelCatalog | null,
+  cachePath: string,
+  binaryPath: string,
+): AgyModelDiscoveryResult | null {
+  if (!cached || cached.binaryPath !== binaryPath || cached.models.length === 0) return null;
+  return { source: 'cache', cachePath, catalog: cached, stale: true };
 }
 
 export function discoverAgyModels(
@@ -236,20 +344,45 @@ export function discoverAgyModels(
   const binaryPath = findExecutable('agy', env);
   if (!binaryPath) throw new Error('AGY executable not found on PATH');
 
-  const binaryMtimeMs = existsSync(binaryPath) ? statSync(binaryPath).mtimeMs : 0;
-  const binaryVersion = runAgy(binaryPath, ['--version'], env, timeoutMs);
-  const identity = { binaryPath, binaryVersion, binaryMtimeMs };
+  const identityBefore = readIdentity(binaryPath, env, timeoutMs);
   const cached = readCache(cachePath);
-  if (!options.refresh && cached && isAgyModelCatalogFresh(cached, identity, now)) {
+  if (!options.refresh && cached && isAgyModelCatalogFresh(cached, identityBefore, now)) {
     return { source: 'cache', cachePath, catalog: cached };
   }
 
-  const output = runAgy(binaryPath, ['models'], env, timeoutMs);
-  const catalog = buildAgyModelCatalog({
-    ...identity,
-    fetchedAt: now,
-    output,
-  });
+  let capture: AgyCapture;
+  try {
+    capture = runAgy(binaryPath, ['models'], env, timeoutMs);
+  } catch (error) {
+    const fallback = staleFallback(cached, cachePath, binaryPath);
+    if (fallback) return fallback;
+    throw error;
+  }
+
+  let identityAfter = readIdentity(binaryPath, env, timeoutMs);
+
+  // AGY can update itself between `--version` and `models`. Never stamp model
+  // output produced by one binary with another binary's identity. Re-run once
+  // after an observed version/mtime change and persist only the stable result.
+  if (!sameIdentity(identityBefore, identityAfter)) {
+    try {
+      capture = runAgy(binaryPath, ['models'], env, timeoutMs);
+      identityAfter = readIdentity(binaryPath, env, timeoutMs);
+    } catch (error) {
+      const fallback = staleFallback(cached, cachePath, binaryPath);
+      if (fallback) return fallback;
+      throw error;
+    }
+  }
+
+  const ids = parseAgyModelsStreams(capture.stdout, capture.stderr);
+  if (ids.length === 0) {
+    const fallback = staleFallback(cached, cachePath, binaryPath);
+    if (fallback) return fallback;
+    throw new Error('AGY models returned no parseable model identifiers');
+  }
+
+  const catalog = buildCatalogFromIds(identityAfter, now, ids);
   writeCache(cachePath, catalog);
   return { source: 'agy', cachePath, catalog };
 }
