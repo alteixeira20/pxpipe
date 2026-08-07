@@ -18,6 +18,7 @@ import {
   isAgyModelCatalogFresh,
   parseAgyModelCatalog,
   parseAgyModelsOutput,
+  parseAgyModelsStreams,
 } from '../src/agy-models.js';
 
 const temporaryDirectories: string[] = [];
@@ -48,6 +49,16 @@ describe('AGY model output parsing', () => {
       'gemini-3.6-flash-high',
       'claude-sonnet-4-6',
       'gpt-oss-120b-medium',
+    ]);
+  });
+
+  it('accepts table/bullet output and safely inspects stderr without retaining warnings', () => {
+    expect(parseAgyModelsStreams(
+      'Available models:\n  - gemini-3.6-flash-high  default\n',
+      '\u001b[32m* claude-sonnet-4-6 available\u001b[0m\nwarning\naccount@example.test\n',
+    )).toEqual([
+      'gemini-3.6-flash-high',
+      'claude-sonnet-4-6',
     ]);
   });
 
@@ -171,12 +182,110 @@ esac
 
     const calls = readFileSync(callsPath, 'utf8').trim().split(/\r?\n/);
     expect(calls).toEqual([
-      '--version', 'models',
+      '--version', 'models', '--version',
       '--version',
-      '--version', 'models',
+      '--version', 'models', '--version',
     ]);
     expect(statSync(cachePath).mode & 0o077).toBe(0);
     expect(readFileSync(cachePath, 'utf8')).not.toContain('example.test');
+  });
+
+  it('re-reads models when AGY updates itself during discovery', () => {
+    const directory = temporaryDirectory();
+    const binary = join(directory, 'agy');
+    const cachePath = join(directory, 'cache', 'agy-models.json');
+    const callsPath = join(directory, 'calls.log');
+    const versionPath = join(directory, 'version.txt');
+    writeFileSync(versionPath, '1.1.10\n');
+
+    writeFileSync(binary, `#!/bin/bash
+set -eu
+printf '%s\\n' "$1" >> "$AGY_FAKE_CALLS"
+case "$1" in
+  --version)
+    cat "$AGY_FAKE_VERSION"
+    ;;
+  models)
+    current=$(cat "$AGY_FAKE_VERSION")
+    if [[ "$current" == '1.1.10' ]]; then
+      printf '%s\\n' '1.1.11' > "$AGY_FAKE_VERSION"
+      printf '%s\\n' 'gemini-3.6-flash-high' 'claude-sonnet-4-6'
+    else
+      printf '%s\\n' \\
+        'Available models:' \\
+        '  - gemini-3.6-flash-high  default' \\
+        '  - claude-sonnet-4-6  available' >&2
+    fi
+    ;;
+esac
+`);
+    chmodSync(binary, 0o700);
+
+    const result = discoverAgyModels({
+      env: {
+        PATH: directory,
+        HOME: directory,
+        AGY_FAKE_CALLS: callsPath,
+        AGY_FAKE_VERSION: versionPath,
+      },
+      cachePath,
+      now: 20_000,
+      refresh: true,
+    });
+
+    expect(result.source).toBe('agy');
+    expect(result.stale).toBeUndefined();
+    expect(result.catalog.binaryVersion).toBe('1.1.11');
+    expect(result.catalog.models.map((model) => model.id)).toEqual([
+      'gemini-3.6-flash-high',
+      'claude-sonnet-4-6',
+    ]);
+    expect(readFileSync(cachePath, 'utf8')).not.toContain('Available models');
+    expect(readFileSync(callsPath, 'utf8').trim().split(/\r?\n/)).toEqual([
+      '--version', 'models', '--version', 'models', '--version',
+    ]);
+  });
+
+  it('retains a sanitized stale catalog when a refresh temporarily fails', () => {
+    const directory = temporaryDirectory();
+    const binary = join(directory, 'agy');
+    const cachePath = join(directory, 'cache', 'agy-models.json');
+    const failPath = join(directory, 'fail');
+
+    writeFileSync(binary, `#!/bin/bash
+set -eu
+case "$1" in
+  --version)
+    printf '%s\\n' '1.1.11'
+    ;;
+  models)
+    if [[ -f "$AGY_FAKE_FAIL" ]]; then
+      printf '%s\\n' 'private-account@example.test' >&2
+      exit 7
+    fi
+    printf '%s\\n' 'gemini-3.6-flash-high' 'claude-sonnet-4-6'
+    ;;
+esac
+`);
+    chmodSync(binary, 0o700);
+
+    const env = {
+      PATH: directory,
+      HOME: directory,
+      AGY_FAKE_FAIL: failPath,
+    };
+    const first = discoverAgyModels({ env, cachePath, now: 30_000 });
+    writeFileSync(failPath, '1');
+    const fallback = discoverAgyModels({ env, cachePath, now: 30_100, refresh: true });
+
+    expect(first.source).toBe('agy');
+    expect(fallback.source).toBe('cache');
+    expect(fallback.stale).toBe(true);
+    expect(fallback.catalog.models.map((model) => model.id)).toEqual([
+      'gemini-3.6-flash-high',
+      'claude-sonnet-4-6',
+    ]);
+    expect(readFileSync(cachePath, 'utf8')).not.toContain('private-account');
   });
 
   it('fails safely without exposing AGY stderr', () => {
