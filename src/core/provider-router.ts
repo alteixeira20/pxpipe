@@ -1,6 +1,8 @@
 import { createProxy, type ProxyConfig, type ProxyEvent } from './proxy.js';
 
 export type ProviderProtocol = 'anthropic' | 'openai' | 'google';
+export type ProviderProxyHandler = (request: Request) => Promise<Response>;
+export type ProviderHandlerFactory = (config: ProxyConfig) => ProviderProxyHandler;
 
 export interface ProviderRouteDefinition {
   /** Stable route id used in `/providers/<id>/...`. */
@@ -18,6 +20,9 @@ export interface ProviderRouterConfig {
   providers: readonly ProviderRouteDefinition[];
   /** Optional observer invoked after the provider-specific observer. */
   onRequest?: (providerId: string, event: ProxyEvent) => void | Promise<void>;
+  /** Product hosts can supply a reliability wrapper (for example fail-open)
+   * while the low-level router remains createProxy-compatible by default. */
+  handlerFactory?: ProviderHandlerFactory;
 }
 
 export interface ParsedProviderRoute {
@@ -104,23 +109,24 @@ function rewriteProviderRequest(request: Request, route: ParsedProviderRoute): R
 }
 
 /**
- * Create one request handler that multiplexes several provider-specific
- * `createProxy` instances behind a single HTTP listener.
+ * Create one request handler that multiplexes several provider-specific proxy
+ * configurations behind a single HTTP listener.
+ *
+ * The default handler factory is the low-level `createProxy`. Product hosts may
+ * inject `createFailOpenProxy` (or an equivalent reliability wrapper) so every
+ * provider route has the same safety/failure semantics without duplicating the
+ * router implementation.
  *
  * Legacy paths continue through `defaultProxy`. Explicit provider paths use:
  *
  *   /providers/<provider-id>/<upstream-path>
- *
- * Example:
- *
- *   /providers/featherless/v1/chat/completions
- *       -> Featherless handler sees /v1/chat/completions
  */
 export function createProviderRouter(
   config: ProviderRouterConfig,
-): ((request: Request) => Promise<Response>) & { inspect(): ProviderRouterInspection } {
-  const defaultHandler = createProxy(config.defaultProxy);
-  const handlers = new Map<string, ReturnType<typeof createProxy>>();
+): ProviderProxyHandler & { inspect(): ProviderRouterInspection } {
+  const factory = config.handlerFactory ?? createProxy;
+  const defaultHandler = factory(config.defaultProxy);
+  const handlers = new Map<string, ProviderProxyHandler>();
   const definitions = new Map<string, ProviderRouteDefinition>();
 
   for (const definition of config.providers) {
@@ -131,7 +137,7 @@ export function createProviderRouter(
     definitions.set(definition.id, definition);
     handlers.set(
       definition.id,
-      createProxy(wrapProviderObserver(definition, config.onRequest)),
+      factory(wrapProviderObserver(definition, config.onRequest)),
     );
   }
 
