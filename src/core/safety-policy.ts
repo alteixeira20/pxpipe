@@ -65,6 +65,7 @@ const PROFILES: Record<CompressionProfileName, CompressionProfile> = {
       collapseHistory: true,
       historyAmortizationHorizon: 4,
       reflow: true,
+      requireLosslessRender: true,
       gptHistory: {
         keepTail: 12,
         keepRecentPairs: 12,
@@ -85,6 +86,7 @@ const PROFILES: Record<CompressionProfileName, CompressionProfile> = {
       collapseHistory: true,
       historyAmortizationHorizon: 3,
       reflow: true,
+      requireLosslessRender: true,
       gptHistory: {
         keepTail: 8,
         keepRecentPairs: 8,
