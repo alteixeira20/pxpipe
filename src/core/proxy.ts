@@ -4,6 +4,8 @@
  */
 
 import { markCacheDead, noteCacheOutcome, responseLeftNoCache } from './session-state.js';
+import { noteTrajectoryCompression, observeAnthropicTrajectory, type TrajectoryObservation } from './trajectory.js';
+import { applyTrajectoryCircuitBreaker } from './trajectory-policy.js';
 import { transformRequest, type TransformOptions, type TransformInfo } from './transform.js';
 import { isClaudeModel, transformOpenAIChatCompletions, transformOpenAIResponses } from './openai.js';
 import { isAnthropicMessagesPath, isPxpipeSupportedGptModel, isPxpipeSupportedModel } from './applicability.js';
@@ -138,6 +140,8 @@ export interface ProxyEvent {
   fallback_reason?: string;
   fallback_result?: 'success' | 'failed' | 'not_attempted';
   upstream_attempt_count?: number;
+  /** Privacy-preserving session trajectory counters; never contains tool input, paths or result text. */
+  trajectory?: TrajectoryObservation;
 }
 
 /** Max chars of 4xx error body captured on ProxyEvent — enough for Anthropic's full error JSON. */
@@ -1269,6 +1273,7 @@ export function createProxy(config: ProxyConfig = {}) {
           fallback_reason: featherlessProvider ? fallbackReason : undefined,
           fallback_result: featherlessProvider ? fallbackResult : undefined,
           upstream_attempt_count: featherlessProvider ? upstreamAttemptCount : undefined,
+          trajectory,
         });
       };
       void finalize();
@@ -1327,6 +1332,7 @@ export function createProxy(config: ProxyConfig = {}) {
     let baselinePromise: Promise<number | null> | undefined;
     let baselineCacheablePromise: Promise<number | null> | undefined;
     let baselineStatusApplies = false;
+    let trajectory: TrajectoryObservation | undefined;
 
     if (isMessages || isOpenAIChat || isOpenAIResponses || isGoogle) {
       const bodyIn = new Uint8Array(await req.arrayBuffer());
@@ -1337,6 +1343,9 @@ export function createProxy(config: ProxyConfig = {}) {
         // Fail-closed: unreadable model → no compression, not a risky guess.
         const model = googleModel ?? readModelField(bodyIn);
         requestModel = model ?? undefined;
+        if (isMessages) {
+          trajectory = await observeAnthropicTrajectory(bodyIn, requestModel);
+        }
         // A turn whose only content is `@pxpipe pin` / `@pxpipe unpin` is
         // configuration, not a question. Answer it here: forwarding it would bill
         // a full prefix to have the model paraphrase a list the proxy already
@@ -1435,9 +1444,10 @@ export function createProxy(config: ProxyConfig = {}) {
         if ((bridgedGptMessages || bridgedChatMessages) && effectiveModel) {
           requestModel = effectiveModel;
         }
-        const effectiveOpts: TransformOptions = (modelOk
+        const profileOpts: TransformOptions = (modelOk
           ? (featherlessProvider ? { ...transformOpts, imagePlacement: 'merge_first_user' as const, imageDetail: 'auto' as const } : transformOpts)
           : { ...transformOpts, compress: false }) ?? { compress: false };
+        const effectiveOpts = applyTrajectoryCircuitBreaker(profileOpts, trajectory);
         const bridgeBody = bridgedGptMessages
           ? (() => {
               const bridged = JSON.parse(new TextDecoder().decode(
@@ -1460,6 +1470,12 @@ export function createProxy(config: ProxyConfig = {}) {
             : isOpenAIChat
               ? await transformOpenAIChatCompletions(bodyIn, effectiveOpts)
               : await transformOpenAIResponses(bodyIn, effectiveOpts);
+        if (trajectory) {
+          noteTrajectoryCompression(
+            trajectory.sessionSha8,
+            Boolean(r.info.compressed && (r.info.imageCount ?? 0) > 0),
+          );
+        }
         if (isGoogle && r.info.compressed) {
           const countHeaders = applyGatewayHeaders(filterHeaders(req.headers, STRIP_REQ_HEADERS));
           countHeaders.set('content-type', 'application/json');
