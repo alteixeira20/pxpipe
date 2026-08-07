@@ -70,3 +70,11 @@ export {
   type NormalizedAccounting,
   type SavingsEvidence,
 } from './accounting.js';
+export {
+  clearTrajectoryState,
+  noteTrajectoryCompression,
+  observeAnthropicTrajectory,
+  trajectoryLimits,
+  type TrajectoryObservation,
+} from './trajectory.js';
+export { applyTrajectoryCircuitBreaker } from './trajectory-policy.js';
