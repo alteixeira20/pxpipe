@@ -13,7 +13,7 @@ describe('parseGoogleModelFromPath', () => {
   it('extracts model name from Google AI Studio URL path', () => {
     expect(parseGoogleModelFromPath('/google-ai-studio/v1beta/models/gemini-3.6-flash:generateContent')).toBe('gemini-3.6-flash');
     expect(parseGoogleModelFromPath('/google-ai-studio/v1/models/gemini-3.6-flash:streamGenerateContent')).toBe('gemini-3.6-flash');
-    expect(parseGoogleModelFromPath('/v1beta/models/gemini-3.6-flash:streamGenerateContent')).toBeNull();
+    expect(parseGoogleModelFromPath('/v1beta/models/gemini-3.6-flash:streamGenerateContent')).toBe('gemini-3.6-flash');
     expect(parseGoogleModelFromPath('/foo/google-ai-studio/v1beta/models/gemini-3.6-flash:generateContent')).toBeNull();
     expect(parseGoogleModelFromPath('/google-ai-studio/v1beta/models/gemini-3.6-flash:countTokens')).toBeNull();
     expect(parseGoogleModelFromPath('/v1/messages')).toBeNull();
