@@ -52,6 +52,8 @@ export {
   parseProviderRoute,
   type ParsedProviderRoute,
   type ProviderProtocol,
+  type ProviderProxyHandler,
+  type ProviderHandlerFactory,
   type ProviderRouteDefinition,
   type ProviderRouterConfig,
   type ProviderRouterInspection,
