@@ -64,8 +64,17 @@ lines = [
 ]
 
 replacement = '    const binaryBlock = ' + repr('\n'.join(lines)) + ';\n'
-# repr uses single-quoted Python literal which is valid JS for this content because
-# embedded single quotes are escaped; normalize Python's escaped newlines as JS.
 replacement = replacement.replace('\\x60', '`')
 text = text[:start] + replacement + text[end:]
+
+# The proxy forwards transformed JSON as Uint8Array. The first regression test
+# accidentally stringified the typed array itself ("123,34,...") and made its
+# own mock fetch throw, which correctly surfaced as a 502 transport error. Decode
+# the body bytes like a real HTTP peer before JSON.parse.
+old = "        outgoing = JSON.parse(String(init?.body));"
+new = "        const rawBody = init?.body instanceof Uint8Array\\n          ? new TextDecoder().decode(init.body)\\n          : String(init?.body ?? '');\\n        outgoing = JSON.parse(rawBody);"
+if old not in text:
+    raise RuntimeError('missing Antigravity test body-decoding fixture')
+text = text.replace(old, new, 1)
+
 path.write_text(text)
