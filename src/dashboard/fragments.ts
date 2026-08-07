@@ -99,7 +99,8 @@ export function renderModelsFragment(
   configured: string[],
   enabled: boolean,
 ): string {
-  const on = new Set(active);
+  const effective = new Set(active);
+  const requested = new Set(configured);
   const labelOf = new Map(
     [...MODEL_CATALOG, ...GPT_MODEL_CATALOG, ...GROK_MODEL_CATALOG, ...GEMINI_MODEL_CATALOG].map((m) => [m.id, m.label]),
   );
@@ -122,12 +123,17 @@ export function renderModelsFragment(
     }
   }
   const chipFor = (id: string): string => {
-    const lit = on.has(id);
+    const lit = effective.has(id);
+    const wanted = requested.has(id);
     const label = labelOf.get(id) ?? id;
+    const state = lit ? ' ✓' : wanted ? ' · configured' : '';
+    const title = wanted && !lit
+      ? 'Configured in PXPIPE_MODELS, but blocked by the current semantic safety profile.'
+      : lit ? 'Configured and active.' : 'Not configured.';
     return (
-      `<button class="chip${lit ? ' on' : ''}" type="button" ` +
-      `hx-post="/fragments/models" hx-target="#frag-models" ` +
-      `hx-vals='${escapeHtml(`{"model":${JSON.stringify(id)},"on":${!lit}}`)}'>${escapeHtml(label)}${lit ? ' ✓' : ''}</button>`
+      `<button class="chip${lit ? ' on' : wanted ? ' configured' : ''}" type="button" ` +
+      `title="${escapeHtml(title)}" hx-post="/fragments/models" hx-target="#frag-models" ` +
+      `hx-vals='${escapeHtml(`{"model":${JSON.stringify(id)},"on":${!wanted}}`)}'>${escapeHtml(label + state)}</button>`
     );
   };
   const claudeChips = ids.filter((id) => id.startsWith('claude')).map(chipFor).join('');
@@ -151,7 +157,7 @@ export function renderModelsFragment(
     `<div class="models">` +
     `<span class="models-label">Image Gemini models</span>` +
     geminiChips +
-    `<span class="hint">enabled by default · 100/100 vision reader</span>` +
+    `<span class="hint">validated for coding-safe · AGY high/medium/low aliases share this profile</span>` +
     `</div>` +
     `<div class="models">` +
     `<span class="models-label">Image OpenAI Responses models</span>` +
@@ -163,9 +169,9 @@ export function renderModelsFragment(
     `<div class="models">` +
     `<span class="models-label">PXPIPE_MODELS</span>` +
     `<input class="models-csv" id="models-csv" type="text" name="list" ` +
-    `value="${escapeHtml(active.join(','))}" spellcheck="false" autocomplete="off" ` +
+    `value="${escapeHtml(configured.join(','))}" spellcheck="false" autocomplete="off" ` +
     `hx-post="/fragments/models" hx-target="#frag-models" hx-trigger="change">` +
-    `<span class="hint">CSV of bases, or off · applies on enter/blur · export to persist</span>` +
+    `<span class="hint">requested CSV scope · applies on enter/blur · persisted to config; safety profile may block experimental families</span>` +
     `</div>`
   );
 }

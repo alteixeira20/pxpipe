@@ -44,9 +44,24 @@ export const GEMINI_3_6_FLASH_PROFILE: GptModelProfile = {
   },
 };
 
-export function isGeminiModel(model: string | null | undefined): boolean {
+/**
+ * AGY/Antigravity exposes Gemini 3.6 Flash effort variants as model ids ending
+ * in `-high`, `-medium`, and `-low`. They select serving effort rather than a
+ * different image tokenizer/rendering geometry, so they share the measured 3.6
+ * Flash profile. Other Gemini generations remain excluded until separately
+ * validated.
+ */
+export function canonicalGeminiModel(model: string | null | undefined): string | null {
   const id = (model ?? '').toLowerCase();
-  return id === 'gemini-3.6-flash' || id === 'google/gemini-3.6-flash';
+  const unqualified = id.startsWith('google/') ? id.slice('google/'.length) : id;
+  if (/^gemini-3\.6-flash(?:-(?:high|medium|low))?$/.test(unqualified)) {
+    return 'gemini-3.6-flash';
+  }
+  return null;
+}
+
+export function isGeminiModel(model: string | null | undefined): boolean {
+  return canonicalGeminiModel(model) !== null;
 }
 
 export function resolveGeminiProfile(): GptModelProfile {
@@ -54,8 +69,8 @@ export function resolveGeminiProfile(): GptModelProfile {
 }
 
 /** Gemini image tokens, with an explicit guard: this path is only reachable for
- *  ids pxpipe has actually measured. The numbers themselves live in the profile
- *  (`GEMINI_3_6_FLASH_PROFILE.vision`) and are applied by `visionTokens`. */
+ *  ids pxpipe has actually measured (including AGY effort aliases). The numbers
+ *  themselves live in `GEMINI_3_6_FLASH_PROFILE.vision`. */
 export function geminiVisionTokens(model: string, w: number, h: number): number {
   if (!isGeminiModel(model) || !Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) {
     throw new Error(`Unsupported Gemini image-token estimate: ${model} ${w}x${h}`);

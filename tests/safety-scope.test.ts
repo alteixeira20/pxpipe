@@ -29,16 +29,16 @@ describe('semantic safety scope gates model families', () => {
       'moonshotai/kimi-k3',
     ]);
 
-    expect(getAllowedModelBases()).toEqual(['claude-fable-5']);
+    expect(getAllowedModelBases()).toEqual(['claude-fable-5', 'gemini-3.6-flash']);
     expect(isPxpipeSupportedModel('claude-fable-5')).toBe(true);
-    expect(isPxpipeSupportedModel('gemini-3.6-flash')).toBe(false);
+    expect(isPxpipeSupportedModel('gemini-3.6-flash')).toBe(true);
     expect(isPxpipeSupportedGptModel('gpt-5.6-sol')).toBe(false);
   });
 
   it('balanced preserves the same validated model boundary', () => {
     setCompressionSafetyScope('balanced');
     setAllowedModelBases(['claude-fable-5', 'gemini-3.6-flash']);
-    expect(getAllowedModelBases()).toEqual(['claude-fable-5']);
+    expect(getAllowedModelBases()).toEqual(['claude-fable-5', 'gemini-3.6-flash']);
   });
 
   it('aggressive allows explicit experimental model opt-ins', () => {

@@ -1,6 +1,7 @@
 export {
   getAllowedModelBases,
   getConfiguredModelBases,
+  getRequestedModelBases,
   isPxpipeSupportedGptModel,
   isPxpipeSupportedModel,
   isPxpipeSupportedModelForScope,
@@ -85,3 +86,10 @@ export {
   parsePersistentWarpRouteEnv,
   persistentWarpRouteSpecs,
 } from '../warp/persistent.js';
+
+export {
+  inspectAntigravityEnvelope,
+  isAntigravityInferencePath,
+  transformAntigravityGenerateContent,
+  type AntigravityEnvelopeMetadata,
+} from './antigravity.js';

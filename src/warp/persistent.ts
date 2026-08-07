@@ -24,6 +24,12 @@ export function persistentWarpRouteSpecs(port: number): string[] {
     `generativelanguage.googleapis.com/v1beta/models/*:streamGenerateContent=${local}/providers/google`,
     `generativelanguage.googleapis.com/v1/models/*:generateContent=${local}/providers/google`,
     `generativelanguage.googleapis.com/v1/models/*:streamGenerateContent=${local}/providers/google`,
+    `cloudcode-pa.googleapis.com/v1internal:generateContent=${local}/providers/antigravity-cloudcode`,
+    `cloudcode-pa.googleapis.com/v1internal:streamGenerateContent=${local}/providers/antigravity-cloudcode`,
+    `daily-cloudcode-pa.googleapis.com/v1internal:generateContent=${local}/providers/antigravity-daily`,
+    `daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent=${local}/providers/antigravity-daily`,
+    `daily-cloudcode-pa.sandbox.googleapis.com/v1internal:generateContent=${local}/providers/antigravity-sandbox`,
+    `daily-cloudcode-pa.sandbox.googleapis.com/v1internal:streamGenerateContent=${local}/providers/antigravity-sandbox`,
   ];
 }
 

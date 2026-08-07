@@ -286,7 +286,7 @@ Environment:
                             aggressive — legacy lossy maximum-density behavior; A/B only
                             passthrough — disable compression
   PXPIPE_MODELS           comma-separated model bases to image (Claude/Gemini/GPT/Grok);
-                          default claude-fable-5 only; other families are explicit opt-in
+                          default claude-fable-5 + gemini-3.6-flash; other families are explicit opt-in
                           until their provider-specific coding-safe path is validated;
                           off disables
   PXPIPE_CONFIG           JSON config path (default ~/.config/pxpipe/config.json)
@@ -1333,6 +1333,8 @@ async function main(): Promise<void> {
         proxy: {
           ...config,
           provider: undefined,
+          gatewayBaseUrl: undefined,
+          gatewayHeaders: {},
           upstream: opts.upstream,
           openAIModels: [],
           cloudflareModels: [],
@@ -1344,6 +1346,8 @@ async function main(): Promise<void> {
         proxy: {
           ...config,
           provider: undefined,
+          gatewayBaseUrl: undefined,
+          gatewayHeaders: {},
           upstream: opts.upstream,
           apiKey: undefined,
           authToken: undefined,
@@ -1358,6 +1362,8 @@ async function main(): Promise<void> {
         proxy: {
           ...config,
           provider: 'featherless',
+          gatewayBaseUrl: undefined,
+          gatewayHeaders: {},
           upstream: opts.upstream,
           apiKey: undefined,
           authToken: undefined,
@@ -1373,7 +1379,60 @@ async function main(): Promise<void> {
         proxy: {
           ...config,
           provider: undefined,
+          gatewayBaseUrl: undefined,
+          gatewayHeaders: {},
           upstream: opts.googleUpstream,
+          apiKey: undefined,
+          authToken: undefined,
+          openAIApiKey: undefined,
+          openAIModels: [],
+          cloudflareModels: [],
+        },
+      },
+      {
+        id: 'antigravity-cloudcode',
+        protocol: 'google',
+        proxy: {
+          ...config,
+          provider: undefined,
+          googleEnvelope: 'antigravity',
+          gatewayBaseUrl: undefined,
+          gatewayHeaders: {},
+          upstream: 'https://cloudcode-pa.googleapis.com',
+          apiKey: undefined,
+          authToken: undefined,
+          openAIApiKey: undefined,
+          openAIModels: [],
+          cloudflareModels: [],
+        },
+      },
+      {
+        id: 'antigravity-daily',
+        protocol: 'google',
+        proxy: {
+          ...config,
+          provider: undefined,
+          googleEnvelope: 'antigravity',
+          gatewayBaseUrl: undefined,
+          gatewayHeaders: {},
+          upstream: 'https://daily-cloudcode-pa.googleapis.com',
+          apiKey: undefined,
+          authToken: undefined,
+          openAIApiKey: undefined,
+          openAIModels: [],
+          cloudflareModels: [],
+        },
+      },
+      {
+        id: 'antigravity-sandbox',
+        protocol: 'google',
+        proxy: {
+          ...config,
+          provider: undefined,
+          googleEnvelope: 'antigravity',
+          gatewayBaseUrl: undefined,
+          gatewayHeaders: {},
+          upstream: 'https://daily-cloudcode-pa.sandbox.googleapis.com',
           apiKey: undefined,
           authToken: undefined,
           openAIApiKey: undefined,

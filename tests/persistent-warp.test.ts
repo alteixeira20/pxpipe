@@ -23,6 +23,21 @@ describe('persistent warp routes', () => {
       '/v1/models/gemini-3.6-flash-high:streamGenerateContent',
       '/providers/google/v1/models/gemini-3.6-flash-high:streamGenerateContent',
     ],
+    [
+      'cloudcode-pa.googleapis.com:443',
+      '/v1internal:generateContent',
+      '/providers/antigravity-cloudcode/v1internal:generateContent',
+    ],
+    [
+      'daily-cloudcode-pa.googleapis.com:443',
+      '/v1internal:streamGenerateContent',
+      '/providers/antigravity-daily/v1internal:streamGenerateContent',
+    ],
+    [
+      'daily-cloudcode-pa.sandbox.googleapis.com:443',
+      '/v1internal:generateContent',
+      '/providers/antigravity-sandbox/v1internal:generateContent',
+    ],
   ])('routes %s%s through the matching explicit provider', (host, path, expectedPath) => {
     const route = matchRoute(routes, host, path);
     expect(route).not.toBeNull();
@@ -54,5 +69,14 @@ describe('persistent warp routes', () => {
       'one.example/v1/*=http://127.0.0.1:1',
       'two.example/*=http://127.0.0.1:2',
     ]);
+  });
+});
+
+// Control-plane calls on an intercepted host must still re-origin unchanged.
+describe('Antigravity persistent route safety', () => {
+  const routes = buildPersistentWarpRoutes(47821);
+  it('does not divert Antigravity control-plane endpoints', () => {
+    expect(matchRoute(routes, 'cloudcode-pa.googleapis.com:443', '/v1internal:fetchAvailableModels')).toBeNull();
+    expect(matchRoute(routes, 'cloudcode-pa.googleapis.com:443', '/v1internal:loadCodeAssist')).toBeNull();
   });
 });
