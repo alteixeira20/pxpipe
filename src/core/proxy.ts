@@ -25,6 +25,11 @@ import {
 } from './messages-chat-bridge.js';
 import { pinCommandResponse, pinCommandResponseOpenAI } from './pin.js';
 import { parseGoogleModelFromPath, transformGoogleGenerateContent } from './google.js';
+import {
+  inspectAntigravityEnvelope,
+  isAntigravityInferencePath,
+  transformAntigravityGenerateContent,
+} from './antigravity.js';
 import { isGeminiModel } from './gemini-model-profiles.js';
 import { resolveGptProfile } from './gpt-model-profiles.js';
 import {
@@ -47,6 +52,9 @@ export interface ProxyConfig {
    *  OpenAI paths drop the `/v1` prefix to match gateway shape. */
   provider?: 'cloudflare-ai-gateway' | 'featherless';
   featherlessTransformMode?: FeatherlessTransformMode;
+  /** Provider-specific Google wire envelope. Antigravity keeps model/project
+   * metadata outside the nested GenerateContent request. */
+  googleEnvelope?: 'antigravity';
   /** Custom fetch implementation (for unit tests / mock servers). */
   customFetch?: typeof fetch;
   /** Gateway base URL (account/gateway-scoped). Required when provider is set. */
@@ -490,12 +498,16 @@ function processSseEvent(
     state.stopReason = typeof reason === 'string' ? reason
       : event === 'response.incomplete' ? 'incomplete' : 'stop';
   }
-  // Google AI Studio streaming chunks: usageMetadata object.
-  if (obj.usageMetadata && typeof obj.usageMetadata === 'object') {
-    const gUsage = normalizeUsage(obj.usageMetadata);
+  // Google AI Studio streams usage at top level. Antigravity wraps the same
+  // payload under `response`; accept both without rewriting the provider response.
+  const nestedGoogleResponse = objectRecord(obj.response);
+  const googleUsageRaw = obj.usageMetadata ?? nestedGoogleResponse?.usageMetadata;
+  if (googleUsageRaw && typeof googleUsageRaw === 'object') {
+    const gUsage = normalizeUsage(googleUsageRaw);
     if (gUsage) state.usage = gUsage;
   }
   measureGoogleCandidates(obj, m, state);
+  if (nestedGoogleResponse) measureGoogleCandidates(nestedGoogleResponse, m, state);
 
   measureOpenAIChoices(obj, m);
   // OpenAI chat chunks: the final chunk carries choices[].finish_reason (earlier chunks ship null).
@@ -881,9 +893,15 @@ function teeForUsage(res: Response): {
           };
           const state: { stopReason: string | undefined } = { stopReason: undefined };
           for (const object of objects) {
-            const nextUsage = normalizeUsage(object.usage ?? object.usageMetadata);
+            const nestedGoogleResponse = objectRecord(object.response);
+            const nextUsage = normalizeUsage(
+              object.usage ?? object.usageMetadata ?? nestedGoogleResponse?.usageMetadata,
+            );
             if (nextUsage) usage = nextUsage;
             recognizedGoogle = measureGoogleCandidates(object, measurement, state) || recognizedGoogle;
+            if (nestedGoogleResponse) {
+              recognizedGoogle = measureGoogleCandidates(nestedGoogleResponse, measurement, state) || recognizedGoogle;
+            }
           }
           const last = objects[objects.length - 1];
           return {
@@ -1294,7 +1312,10 @@ export function createProxy(config: ProxyConfig = {}) {
     const googleModel = req.method === 'POST'
       ? parseGoogleModelFromPath(url.pathname)
       : null;
-    const isGoogleRoute = googleModel !== null;
+    const isAntigravityRoute = req.method === 'POST'
+      && config.googleEnvelope === 'antigravity'
+      && isAntigravityInferencePath(url.pathname);
+    const isGoogleRoute = googleModel !== null || isAntigravityRoute;
     const isGoogle = isGoogleRoute && !bypass;
     const isOpenAIPath = isCanonicalOpenAIPath(
       url.pathname,
@@ -1341,7 +1362,10 @@ export function createProxy(config: ProxyConfig = {}) {
         const transformOpts =
           typeof config.transform === 'function' ? config.transform() : config.transform;
         // Fail-closed: unreadable model → no compression, not a risky guess.
-        const model = googleModel ?? readModelField(bodyIn);
+        // Antigravity owns model metadata in the outer envelope; its nested
+        // GenerateContent request intentionally has no public-API model field.
+        const antigravityMeta = isAntigravityRoute ? inspectAntigravityEnvelope(bodyIn) : null;
+        const model = googleModel ?? antigravityMeta?.model ?? readModelField(bodyIn);
         requestModel = model ?? undefined;
         if (isMessages) {
           trajectory = await observeAnthropicTrajectory(bodyIn, requestModel);
@@ -1459,8 +1483,10 @@ export function createProxy(config: ProxyConfig = {}) {
           : bridgedChatMessages
             ? anthropicMessagesToOpenAIChat(bodyIn, chatStamp ?? undefined)
             : bodyIn;
-        let r = isGoogle
-          ? await transformGoogleGenerateContent(bodyIn, model!, effectiveOpts)
+        let r = isAntigravityRoute && isGoogle
+          ? await transformAntigravityGenerateContent(bodyIn, effectiveOpts)
+          : isGoogle
+            ? await transformGoogleGenerateContent(bodyIn, model!, effectiveOpts)
           : isMessages
             ? bridgedGptMessages
               ? await transformOpenAIResponses(bridgeBody, effectiveOpts)
@@ -1476,7 +1502,7 @@ export function createProxy(config: ProxyConfig = {}) {
             Boolean(r.info.compressed && (r.info.imageCount ?? 0) > 0),
           );
         }
-        if (isGoogle && r.info.compressed) {
+        if (isGoogle && !isAntigravityRoute && r.info.compressed) {
           const countHeaders = applyGatewayHeaders(filterHeaders(req.headers, STRIP_REQ_HEADERS));
           countHeaders.set('content-type', 'application/json');
           const countUrl = new URL(

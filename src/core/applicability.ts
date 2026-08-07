@@ -36,7 +36,7 @@ let runtimeSafetyScope: PxpipeSafetyScope | null = null;
  * filter on top of this list. Keeping this baseline unchanged prevents a semantic
  * policy change from breaking direct createProxy/dashboard/test consumers. */
 const DEFAULT_MODEL_BASES = ['claude-fable-5', 'gemini-3.6-flash'];
-const SAFE_VALIDATED_MODEL_BASES = ['claude-fable-5'];
+const SAFE_VALIDATED_MODEL_BASES = ['claude-fable-5', 'gemini-3.6-flash'];
 
 function falsey(v: string): boolean {
   return /^(0|false|no|off|none)$/i.test(v.trim());
@@ -107,6 +107,13 @@ function allowedModelBases(): string[] {
 /** Current effective allowed-model scope after host semantic safety filtering. */
 export function getAllowedModelBases(): string[] {
   return allowedModelBases();
+}
+
+/** User-requested runtime scope before semantic safety filtering. Dashboard
+ * controls must mutate this set rather than the filtered set or a blocked model
+ * click can silently erase other requested models. */
+export function getRequestedModelBases(): string[] {
+  return configuredModelBases();
 }
 
 /** PXPIPE_MODELS env / historical default scope, independent of runtime override and safety filtering. */

@@ -71,7 +71,7 @@ import {
 } from './dashboard/fragments.js';
 import {
   getAllowedModelBases,
-  getConfiguredModelBases,
+  getRequestedModelBases,
   isPxpipeSupportedModel,
   setAllowedModelBases,
 } from './core/applicability.js';
@@ -541,8 +541,9 @@ export class DashboardState {
    *  no transforms. Controlled by the dashboard "passthrough" toggle so
    *  the operator can toggle the proxy's transform instantly.
    *
-   *  Defaults to TRUE since 2026-06-09: scope is Fable 5 only, which reads
-   *  renders at 100/100 (no Opus read tax) with the same image billing, and
+   *  Defaults to TRUE. The coding-safe scope currently validates Fable 5 and
+   *  Gemini 3.6 Flash (including AGY effort aliases); other requested families
+   *  remain configured but inactive until their safe provider path is validated.
    *  the live proxy record measured ~68% real input-token savings on dense
    *  traffic — the old off-default rationale ("cache-illusory savings")
    *  cited the superseded dead verdict. Grok stays opt-in until quality
@@ -1526,7 +1527,7 @@ export class DashboardState {
         return htmlResponse(
           renderModelsFragment(
             getAllowedModelBases(),
-            getConfiguredModelBases(),
+            getRequestedModelBases(),
             this.compressionEnabled,
           ),
         );
@@ -1646,7 +1647,7 @@ export class DashboardState {
    *  config file); otherwise in-memory only and restart resets to the
    *  PXPIPE_MODELS env / built-in default. */
   handleModelsToggle(model: string, on: boolean): void {
-    const next = new Set(getAllowedModelBases());
+    const next = new Set(getRequestedModelBases());
     if (on) next.add(model);
     else next.delete(model);
     this.applyModelBases([...next]);

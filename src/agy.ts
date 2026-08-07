@@ -346,6 +346,37 @@ function routeSpecsFromEnvironment(): string[] {
   return splitRouteEnv(process.env.PXPIPE_AGY_ROUTES ?? process.env.PXPIPE_AGY_ROUTE);
 }
 
+export interface AgyPersistentProxy {
+  proxyUrl: string;
+  caCertPath: string;
+}
+
+function envFalse(value: string | undefined): boolean {
+  return value !== undefined && /^(?:0|false|no|off|none)$/i.test(value.trim());
+}
+
+/** Resolve the already-running PXPipe listener for AGY. A health failure is a
+ * direct-mode fallback, not an AGY failure: compression is an optimization. */
+export async function resolveAgyPersistentProxy(
+  env: NodeJS.ProcessEnv = process.env,
+  fetchFn: typeof fetch = fetch,
+  caLoader: (dir: string) => { certPath: string } = (dir) => CertificateAuthority.loadOrCreate(dir),
+): Promise<AgyPersistentProxy | null> {
+  if (envFalse(env.PXPIPE_AGY_AUTO_PROXY)) return null;
+  const requestedPort = Number(env.PORT ?? DEFAULT_PORT);
+  const port = Number.isFinite(requestedPort) && requestedPort > 0 ? requestedPort : DEFAULT_PORT;
+  const proxyUrl = `http://127.0.0.1:${port}`;
+  try {
+    const response = await fetchFn(`${proxyUrl}/proxy-stats`, { signal: AbortSignal.timeout(1_000) });
+    if (!response.ok) return null;
+  } catch {
+    return null;
+  }
+  const home = env.HOME?.trim() || homedir();
+  const ca = caLoader(join(home, '.pxpipe'));
+  return { proxyUrl, caCertPath: ca.certPath };
+}
+
 function proxyTargetReachable(routes: readonly string[]): Promise<boolean | null> {
   const first = routes[0];
   if (!first) return Promise.resolve(null);
@@ -386,15 +417,28 @@ function spawnWithTransparentLifecycle(
   return child;
 }
 
-function runAgyProcess(args: readonly string[], routeSpecs: readonly string[]): void {
+async function runAgyProcess(args: readonly string[], routeSpecs: readonly string[]): Promise<void> {
   const binary = findExecutable('agy');
   if (!binary) {
     console.error('[pxpipe] agy: executable not found on PATH');
     process.exit(127);
   }
 
+  const debug = /^(?:1|true|yes|on)$/i.test(process.env.PXPIPE_AGY_DEBUG ?? '');
+
   if (routeSpecs.length === 0) {
-    spawnWithTransparentLifecycle(binary, args, buildAgyEnvironment(process.env));
+    const persistent = await resolveAgyPersistentProxy(process.env);
+    if (persistent) {
+      if (debug) console.error(`[pxpipe] agy: ${safeAgyCommandLabel(args)} via persistent ${persistent.proxyUrl}`);
+      spawnWithTransparentLifecycle(
+        binary,
+        args,
+        buildAgyEnvironment(process.env, persistent.proxyUrl, persistent.caCertPath),
+      );
+    } else {
+      if (debug) console.error('[pxpipe] agy: persistent proxy unavailable/disabled; running direct');
+      spawnWithTransparentLifecycle(binary, args, buildAgyEnvironment(process.env));
+    }
     return;
   }
 
@@ -407,7 +451,6 @@ function runAgyProcess(args: readonly string[], routeSpecs: readonly string[]): 
   }
 
   const ca = CertificateAuthority.loadOrCreate(join(homedir(), '.pxpipe'));
-  const debug = /^(?:1|true|yes|on)$/i.test(process.env.PXPIPE_AGY_DEBUG ?? '');
   const handlers = createWarpHandlers({
     routes,
     ca,
@@ -538,12 +581,14 @@ Usage:
   pxpipe warp [--route PATTERN=TARGET]... -- agy [AGY_ARGS...]
   pxpipe doctor agy [--json] [--live]
 
-AGY is kept on its native provider endpoint by default. No provider route is
-injected unless PXPIPE_AGY_ROUTE or PXPIPE_AGY_ROUTES is configured, or a
---route is supplied to pxpipe warp. This preserves authentication, projects,
-agents, plugins, model selection and Remote Control behavior.
+By default pxpipe agy keeps AGY on its native provider URLs but injects the
+running persistent PXPipe listener as HTTP(S)_PROXY. Unrelated/control-plane
+traffic tunnels unchanged; only grounded inference paths are diverted. If the
+listener is unavailable AGY runs direct. Explicit PXPIPE_AGY_ROUTE(S) or warp
+--route retains the legacy per-process override proxy.
 
 Environment:
+  PXPIPE_AGY_AUTO_PROXY   set to off/0/false to force direct AGY networking
   PXPIPE_AGY_ROUTE        one PATTERN=TARGET route
   PXPIPE_AGY_ROUTES       semicolon/newline-separated routes
   PXPIPE_AGY_DEBUG        emit safe route diagnostics (never prompts/schemas)
@@ -561,7 +606,7 @@ export async function runAgyEntry(argv: readonly string[]): Promise<void> {
   if (isAgyWarpInvocation(argv)) {
     try {
       const parsed = parseAgyWarpInvocation(argv);
-      runAgyProcess(parsed.args, parsed.routes);
+      await runAgyProcess(parsed.args, parsed.routes);
     } catch (error) {
       console.error(`[pxpipe] agy: ${(error as Error).message}`);
       process.exit(2);
@@ -581,7 +626,7 @@ export async function runAgyEntry(argv: readonly string[]): Promise<void> {
       console.error(`[pxpipe] agy: ${cooldown.failure}; retry after about ${remaining}s`);
       process.exit(1);
     }
-    runAgyProcess(args, routeSpecsFromEnvironment());
+    await runAgyProcess(args, routeSpecsFromEnvironment());
     return;
   }
 

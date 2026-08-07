@@ -10,12 +10,14 @@ import {
   inspectAgyHelp,
   isAgyWarpInvocation,
   parseAgyWarpInvocation,
+  resolveAgyPersistentProxy,
   runAgyEntry,
   type AgyCapabilities,
   type AgyFailure,
   type AgyFailureKind,
 } from './agy.js';
 import { discoverAgyModels } from './agy-models.js';
+import { isGeminiModel } from './core/gemini-model-profiles.js';
 import {
   clearAgyCooldown,
   extractAgyModel,
@@ -47,6 +49,8 @@ interface AgyDoctorReportV2 {
     configured: boolean;
     count: number;
     compressionReady: boolean;
+    mode: 'persistent' | 'explicit' | 'direct';
+    proxyUrl?: string;
   };
   quota: {
     state: 'unknown' | 'available' | 'blocked';
@@ -189,6 +193,9 @@ async function runDoctor(args: readonly string[]): Promise<void> {
 
   const server = await serverReachable();
   const routes = routeSpecs();
+  const persistentProxy = routes.length === 0 ? await resolveAgyPersistentProxy(process.env) : null;
+  const routeMode = routes.length > 0 ? 'explicit' as const
+    : persistentProxy ? 'persistent' as const : 'direct' as const;
   const cooldown = readAgyCooldown(options.model);
   const report: AgyDoctorReportV2 = {
     ok: Boolean(binary && version && help),
@@ -204,9 +211,13 @@ async function runDoctor(args: readonly string[]): Promise<void> {
     ...(modelKnown !== undefined ? { modelKnown } : {}),
     server,
     route: {
-      configured: routes.length > 0,
-      count: routes.length,
-      compressionReady: routes.length > 0 && server.reachable,
+      configured: routes.length > 0 || persistentProxy !== null,
+      count: routes.length > 0 ? routes.length : persistentProxy ? 1 : 0,
+      compressionReady: routes.length > 0
+        ? server.reachable
+        : Boolean(persistentProxy && options.model && isGeminiModel(options.model)),
+      mode: routeMode,
+      ...(persistentProxy ? { proxyUrl: persistentProxy.proxyUrl } : {}),
     },
     quota: cooldown
       ? {
@@ -225,7 +236,9 @@ async function runDoctor(args: readonly string[]): Promise<void> {
     ], {
       encoding: 'utf8',
       timeout: Number(process.env.PXPIPE_AGY_LIVE_TIMEOUT_MS ?? DEFAULT_LIVE_TIMEOUT_MS),
-      env: buildAgyEnvironment(process.env),
+      env: persistentProxy
+        ? buildAgyEnvironment(process.env, persistentProxy.proxyUrl, persistentProxy.caCertPath)
+        : buildAgyEnvironment(process.env),
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     const stdout = String(result.stdout ?? '');
@@ -272,7 +285,7 @@ async function runDoctor(args: readonly string[]): Promise<void> {
     console.log(`Selected model: ${report.selectedModel}${report.modelKnown === false ? ' (not in AGY catalogue)' : ''}`);
   }
   console.log(`PXPipe server: ${report.server.reachable ? 'reachable' : 'unreachable'} at ${report.server.url}`);
-  console.log(`PXPipe AGY route: ${report.route.configured ? `${report.route.count} configured` : 'not configured (AGY runs direct)'}`);
+  console.log(`PXPipe AGY route: ${report.route.mode}${report.route.proxyUrl ? ` via ${report.route.proxyUrl}` : ''}`);
   console.log(`Quota: ${report.quota.state}${report.quota.failure ? ` (${report.quota.failure})` : ''}`);
   if (!options.live) {
     console.log('Live model call: not requested; use --model MODEL --live to test one model.');
