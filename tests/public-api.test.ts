@@ -309,7 +309,11 @@ describe('public library API', () => {
       }],
       messages: [{ role: 'user', content: 'hello' }],
     }));
-    const transformed = await transformAnthropicMessages({ body: supported, model: 'claude-fable-5' });
+    const transformed = await transformAnthropicMessages({
+      body: supported,
+      model: 'claude-fable-5',
+      options: { profile: 'aggressive' },
+    });
     expect(transformed.applied).toBe(true);
     expect(transformed.reason).toBe('applied');
     expect(transformed.info.compressedChars).toBeGreaterThan(0);
@@ -330,7 +334,7 @@ describe('public library API', () => {
     const transformed = await transformAnthropicMessages({
       body,
       model: 'claude-opus-4-8',
-      options: { charsPerToken: 1, minCompressChars: 1, cols: undefined },
+      options: { profile: 'aggressive', charsPerToken: 1, minCompressChars: 1, cols: undefined },
     });
     expect(transformed.applied).toBe(true);
     expect(transformed.info.firstImageWidth).toBeLessThanOrEqual(1568);
@@ -357,7 +361,11 @@ describe('public library API', () => {
       messages: [{ role: 'user', content: 'hello' }],
     }));
 
-    const transformed = await transformAnthropicMessages({ body, model: 'claude-fable-5' });
+    const transformed = await transformAnthropicMessages({
+      body,
+      model: 'claude-fable-5',
+      options: { profile: 'aggressive' },
+    });
     expect(transformed.applied).toBe(true);
     expect(transformed.info.imageCount).toBeGreaterThan(0);
 
