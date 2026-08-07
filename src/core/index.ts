@@ -80,3 +80,8 @@ export {
   type TrajectoryObservation,
 } from './trajectory.js';
 export { applyTrajectoryCircuitBreaker } from './trajectory-policy.js';
+export {
+  buildPersistentWarpRoutes,
+  parsePersistentWarpRouteEnv,
+  persistentWarpRouteSpecs,
+} from '../warp/persistent.js';
