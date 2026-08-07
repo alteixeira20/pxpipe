@@ -8,6 +8,9 @@
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createWarpRuntime } from './warp/index.js';
+import { CertificateAuthority } from './warp/ca.js';
+import { createWarpHandlers } from './warp/connect.js';
+import { buildPersistentWarpRoutes, parsePersistentWarpRouteEnv } from './warp/persistent.js';
 import { once } from 'node:events';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -1382,9 +1385,31 @@ async function main(): Promise<void> {
   });
   const handle = providerRouter;
 
+  // The same persistent listener also acts as a loopback-only forward proxy.
+  // Unknown hosts are tunneled without TLS termination; only hosts with an
+  // inference route are MITM'd, and unmatched paths on those hosts still go to
+  // the real origin. This lets agents keep first-party provider URLs while
+  // inference requests enter the explicit provider router above.
+  const connectRouteSpecs = parsePersistentWarpRouteEnv(process.env.PXPIPE_CONNECT_ROUTES);
+  const connectRoutes = buildPersistentWarpRoutes(opts.port, connectRouteSpecs);
+  const connectCa = CertificateAuthority.loadOrCreate(path.join(os.homedir(), '.pxpipe'));
+  const connectHandlers = createWarpHandlers({
+    routes: connectRoutes,
+    ca: connectCa,
+    onDivert: (host, requestPath, target) => {
+      console.log(`[pxpipe] CONNECT divert ${host}${requestPath} → ${target}`);
+    },
+  });
+
   const server = createServer((req, res) => {
     Promise.resolve()
       .then(async () => {
+        // Forward proxies use absolute-form request targets for plain HTTP. TLS
+        // arrives through the server's CONNECT event below.
+        if (/^https?:\/\//i.test(req.url ?? '')) {
+          connectHandlers.handleAbsoluteForm(req, res);
+          return;
+        }
         // Local dashboard routes — handled BEFORE the proxy so they never hit
         // api.anthropic.com (which would 404 them).
         const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
@@ -1417,6 +1442,10 @@ async function main(): Promise<void> {
       });
   });
 
+  // CONNECT is a separate event from ordinary HTTP requests, so it can share
+  // the exact same TCP listener and port without another PXPipe service.
+  server.on('connect', connectHandlers.handleConnect);
+
   // IPv6 literals need bracket notation to form a valid URL (http://[::1]:47821).
   const displayHost = opts.host.includes(':') ? `[${opts.host}]` : opts.host;
   const isLoopbackHost =
@@ -1437,6 +1466,8 @@ async function main(): Promise<void> {
       );
     }
     console.log(`[pxpipe] tracking events → ${opts.eventsFile}`);
+    console.log(`[pxpipe] CONNECT proxy → http://127.0.0.1:${opts.port} (${connectRoutes.length} inference route(s))`);
+    console.log(`[pxpipe] CONNECT CA → ${connectCa.certPath}`);
     if (opts.captureErrorReqBody) {
       console.warn(
         `[pxpipe] PXPIPE_DEBUG_CAPTURE_4XX=1 — persisting full 4xx request and ` +
