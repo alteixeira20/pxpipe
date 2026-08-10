@@ -2,7 +2,7 @@ import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { accessSync, chmodSync, constants, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { homedir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { basename, delimiter, dirname, join } from 'node:path';
 
 import { CertificateAuthority } from './warp/ca.js';
 import { createWarpHandlers } from './warp/connect.js';
@@ -156,24 +156,47 @@ export function buildAgyEnvironment(
   return env;
 }
 
-export function findExecutable(name: string, env: NodeJS.ProcessEnv = process.env): string | null {
-  if (name.includes('/')) {
-    try {
-      accessSync(name, constants.X_OK);
-      return name;
-    } catch {
-      return null;
+/**
+ * Resolve a command to a real file, the way the OS would.
+ *
+ * Windows differs from POSIX in three ways that all matter here: PATH is
+ * `;`-separated (splitting on `:` would shred `C:\...`), the executable bit
+ * does not exist, and the name on disk carries an extension from PATHEXT —
+ * npm-installed CLIs land as `codex.cmd`, so looking only for `codex` finds
+ * nothing.
+ */
+export function findExecutable(
+  name: string,
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): string | null {
+  const windows = platform === 'win32';
+  // On Windows the file exists but is never marked executable, so X_OK would
+  // reject every candidate; existence is the strongest check available.
+  const mode = windows ? constants.F_OK : constants.X_OK;
+  const extensions = windows
+    ? ['', ...(env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';').map((ext) => ext.trim()).filter(Boolean)]
+    : [''];
+
+  const resolve = (candidate: string): string | null => {
+    for (const extension of extensions) {
+      const withExtension = `${candidate}${extension}`;
+      try {
+        accessSync(withExtension, mode);
+        return withExtension;
+      } catch {
+        // Try the next extension.
+      }
     }
-  }
-  for (const directory of (env.PATH ?? '').split(':')) {
+    return null;
+  };
+
+  if (name.includes('/') || (windows && name.includes('\\'))) return resolve(name);
+
+  for (const directory of (env.PATH ?? '').split(windows ? ';' : delimiter)) {
     if (!directory) continue;
-    const candidate = join(directory, name);
-    try {
-      accessSync(candidate, constants.X_OK);
-      return candidate;
-    } catch {
-      // Keep searching.
-    }
+    const found = resolve(join(directory, name));
+    if (found) return found;
   }
   return null;
 }
