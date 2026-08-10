@@ -33,6 +33,10 @@ export const CODEX_PROVIDER_ID = 'codex';
 /** The id Codex knows this provider by, inside its own config namespace. */
 export const CODEX_MODEL_PROVIDER_ID = 'pxpipe';
 
+/** Internal header understood only by PXPipe's loopback reliability wrapper.
+ * The wrapper strips it before forwarding to ChatGPT. */
+export const CODEX_PASSTHROUGH_HEADER = 'x-pxpipe-compression';
+
 export const DEFAULT_CODEX_PORT = 47821;
 
 /** Codex appends `/responses` and `/models` to this base. Deliberately without
@@ -42,16 +46,29 @@ export function codexProviderBaseUrl(port: number): string {
   return `http://127.0.0.1:${port}/providers/${CODEX_PROVIDER_ID}`;
 }
 
+export interface CodexConfigOptions {
+  /** Route through PXPipe but force its transform off for this child. Used for
+   * provider-identical A/B measurement; unlike --direct it remains observable. */
+  passthrough?: boolean;
+}
+
 /**
  * The `-c` overrides that route one Codex process through PXPipe.
  *
  * `requires_openai_auth` keeps the ChatGPT bearer, account id and originator
  * headers on the request, so the upstream still sees the user's own session and
  * PXPipe never reads, stores or rewrites the credential.
+ *
+ * Codex's custom provider schema also supports static `http_headers`. PXPipe uses
+ * that only for the explicit passthrough experiment arm; the local wrapper removes
+ * the header before the request is re-originated to ChatGPT.
  */
-export function buildCodexConfigArgs(baseUrl: string): string[] {
+export function buildCodexConfigArgs(
+  baseUrl: string,
+  options: CodexConfigOptions = {},
+): string[] {
   const provider = `model_providers.${CODEX_MODEL_PROVIDER_ID}`;
-  return [
+  const args = [
     '-c', `${provider}.name=PXPipe`,
     '-c', `${provider}.base_url=${baseUrl}`,
     '-c', `${provider}.wire_api=responses`,
@@ -59,6 +76,13 @@ export function buildCodexConfigArgs(baseUrl: string): string[] {
     '-c', `${provider}.supports_websockets=false`,
     '-c', `model_provider=${CODEX_MODEL_PROVIDER_ID}`,
   ];
+  if (options.passthrough) {
+    args.push(
+      '-c',
+      `${provider}.http_headers={ ${CODEX_PASSTHROUGH_HEADER} = "off" }`,
+    );
+  }
+  return args;
 }
 
 function isLoopbackProxyUrl(value: string | undefined): boolean {
@@ -132,12 +156,14 @@ export interface CodexInvocation {
   binary: string;
   /** Skip PXPipe entirely and run the agent untouched. */
   direct: boolean;
+  /** Keep routing/accounting through PXPipe but turn compression off for this child. */
+  passthrough?: boolean;
   /** Everything forwarded to Codex verbatim. */
   args: string[];
 }
 
 /**
- * `pxpipe codex [--binary NAME] [--direct] [--] [codex args...]`
+ * `pxpipe codex [--binary NAME] [--direct|--passthrough] [--] [codex args...]`
  *
  * PXPipe flags are only recognised in the leading position, and `--` ends them
  * explicitly, so any Codex flag of the same spelling still reaches Codex.
@@ -149,6 +175,7 @@ export function parseCodexInvocation(
   const rest = argv[0] === 'codex' ? argv.slice(1) : [...argv];
   let binary = env.PXPIPE_CODEX_BINARY?.trim() || 'codex';
   let direct = false;
+  let passthrough = false;
   let index = 0;
 
   for (; index < rest.length; index += 1) {
@@ -175,10 +202,22 @@ export function parseCodexInvocation(
       direct = true;
       continue;
     }
+    if (arg === '--passthrough') {
+      passthrough = true;
+      continue;
+    }
     break;
   }
 
-  return { binary, direct, args: rest.slice(index) };
+  if (direct && passthrough) {
+    throw new Error('--direct and --passthrough are mutually exclusive');
+  }
+  return {
+    binary,
+    direct,
+    ...(passthrough ? { passthrough: true } : {}),
+    args: rest.slice(index),
+  };
 }
 
 /**
@@ -194,9 +233,10 @@ export function buildCodexCommandArgs(
   baseUrl: string,
   args: readonly string[],
   resolvedModel?: string,
+  options: CodexConfigOptions = {},
 ): string[] {
   const modelArgs = resolvedModel?.trim() ? ['-c', `model=${resolvedModel.trim()}`] : [];
-  return [...buildCodexConfigArgs(baseUrl), ...modelArgs, ...args];
+  return [...buildCodexConfigArgs(baseUrl, options), ...modelArgs, ...args];
 }
 
 export function resolveCodexPort(env: NodeJS.ProcessEnv = process.env): number {
