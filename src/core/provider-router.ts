@@ -41,6 +41,7 @@ export interface ProviderRouterInspection {
 
 const PROVIDER_ID = /^[a-z][a-z0-9-]{0,62}$/;
 const PREFIX = '/providers/';
+const GENERIC_PROVIDER_IDENTITIES = new Set<ProviderProtocol>(['anthropic', 'openai', 'google']);
 
 export function assertProviderId(id: string): void {
   if (!PROVIDER_ID.test(id)) {
@@ -71,6 +72,34 @@ export function parseProviderRoute(pathname: string): ParsedProviderRoute | null
   return { providerId, upstreamPath };
 }
 
+/**
+ * Core createProxy can infer a protocol only from paths it understands. That is
+ * insufficient for explicit routes: `/providers/codex/responses/compact` is a
+ * native OpenAI endpoint but deliberately not a PXPipe transform shape, so core
+ * would otherwise classify its telemetry as Anthropic merely because it fell
+ * through the generic path detector.
+ *
+ * The route table is authoritative for BOTH facts:
+ *   - provider = the concrete route id (`codex`, `google`, ...)
+ *   - accountingProvider = the route protocol (`openai`, `google`, ...)
+ *
+ * A more-specific provider identity installed by a host wrapper — for example
+ * `codex-passthrough`, the controlled A/B arm — is retained. Generic family
+ * identities produced by core are replaced with the explicit route id.
+ */
+function applyExplicitProviderIdentity(
+  definition: ProviderRouteDefinition,
+  event: ProxyEvent,
+): void {
+  if (
+    event.provider === undefined
+    || GENERIC_PROVIDER_IDENTITIES.has(event.provider as ProviderProtocol)
+  ) {
+    event.provider = definition.id;
+  }
+  event.accountingProvider = definition.protocol;
+}
+
 function wrapProviderObserver(
   definition: ProviderRouteDefinition,
   routerObserver: ProviderRouterConfig['onRequest'],
@@ -79,9 +108,7 @@ function wrapProviderObserver(
   return {
     ...definition.proxy,
     onRequest: async (event) => {
-      // Keep provider identity explicit even for generic OpenAI-compatible
-      // providers whose core handler would otherwise leave it unset.
-      event.provider ??= definition.id;
+      applyExplicitProviderIdentity(definition, event);
       await providerObserver?.(event);
       await routerObserver?.(definition.id, event);
     },

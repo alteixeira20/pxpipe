@@ -142,7 +142,7 @@ describe('codex provider route', () => {
     expect(sent.headers.get('session-id')).toBe('sess_1');
   });
 
-  it('records a Codex turn as provider=openai — the event a partner looks for', async () => {
+  it('records Codex route identity separately from OpenAI accounting semantics', async () => {
     mockUpstream(() => responsesReply());
 
     let event: ProxyEvent | undefined;
@@ -150,7 +150,7 @@ describe('codex provider route', () => {
     await (await router(codexRequest(codexTurn()))).text();
     await new Promise((resolve) => setTimeout(resolve, 20));
 
-    expect(event?.provider).toBe('openai');
+    expect(event?.provider).toBe('codex');
     expect(event?.accountingProvider).toBe('openai');
     expect(event?.model).toBe('gpt-5.6-sol');
     expect(event?.path).toBe('/responses');
