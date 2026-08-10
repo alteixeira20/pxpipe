@@ -71,6 +71,23 @@ export function parseProviderRoute(pathname: string): ParsedProviderRoute | null
   return { providerId, upstreamPath };
 }
 
+/** Core createProxy knows only the wire protocol when no provider-specific mode
+ * is configured, so an explicit `/providers/codex/...` request used to be logged
+ * merely as `provider=openai`. That loses the one fact needed to distinguish a
+ * ChatGPT-authenticated Codex workload from unrelated OpenAI Responses traffic.
+ *
+ * Replace only the generic protocol identity (or an absent value) with the
+ * explicit route id. A more-specific identity installed by a host wrapper — for
+ * example `codex-passthrough`, the controlled A/B arm — is deliberately retained. */
+function applyExplicitProviderIdentity(
+  definition: ProviderRouteDefinition,
+  event: ProxyEvent,
+): void {
+  if (event.provider === undefined || event.provider === definition.protocol) {
+    event.provider = definition.id;
+  }
+}
+
 function wrapProviderObserver(
   definition: ProviderRouteDefinition,
   routerObserver: ProviderRouterConfig['onRequest'],
@@ -79,9 +96,7 @@ function wrapProviderObserver(
   return {
     ...definition.proxy,
     onRequest: async (event) => {
-      // Keep provider identity explicit even for generic OpenAI-compatible
-      // providers whose core handler would otherwise leave it unset.
-      event.provider ??= definition.id;
+      applyExplicitProviderIdentity(definition, event);
       await providerObserver?.(event);
       await routerObserver?.(definition.id, event);
     },
