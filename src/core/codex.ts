@@ -36,6 +36,9 @@ export const CODEX_MODEL_PROVIDER_ID = 'pxpipe';
 /** Internal header understood only by PXPipe's loopback reliability wrapper.
  * The wrapper strips it before forwarding to ChatGPT. */
 export const CODEX_PASSTHROUGH_HEADER = 'x-pxpipe-compression';
+/** Distinct value lets telemetry label the routed baseline independently of
+ * ordinary unsupported/passthrough requests. */
+export const CODEX_PASSTHROUGH_HEADER_VALUE = 'codex-passthrough';
 
 export const DEFAULT_CODEX_PORT = 47821;
 
@@ -79,7 +82,7 @@ export function buildCodexConfigArgs(
   if (options.passthrough) {
     args.push(
       '-c',
-      `${provider}.http_headers={ ${CODEX_PASSTHROUGH_HEADER} = "off" }`,
+      `${provider}.http_headers={ ${CODEX_PASSTHROUGH_HEADER} = "${CODEX_PASSTHROUGH_HEADER_VALUE}" }`,
     );
   }
   return args;
