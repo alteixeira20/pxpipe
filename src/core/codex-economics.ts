@@ -29,10 +29,15 @@ export interface CodexEconomicsReport {
   usageRequests: number;
   transformedRequests: number;
   passthroughBaselineRequests: number;
+  /** Provider-reported actual input/output usage. */
   providerInputTokens: number;
   providerOutputTokens: number;
   cachedTokens: number;
   cacheSharePct: number;
+  /** Reconstructed all-request raw text counterfactual: actual provider input
+   * plus the exact text→image/native delta on transformed rows. */
+  rawBaselineProviderInput: number;
+  rawSavedPct: number;
   baselineImagedTokens: number;
   imageTokens: number;
   nativeInjectedTokens: number;
@@ -228,6 +233,14 @@ export function buildCodexEconomicsReport(
 
   const grossRawSavedTokens = baselineImagedTokens - imageTokens;
   const netRawSavedTokens = grossRawSavedTokens - nativeInjectedTokens;
+  // Unlike the cache-weighted effective view, this raw provider-token view says
+  // exactly how much input the request shrank on the wire. That distinction is
+  // essential for ChatGPT subscriptions: PXPipe can measure both quantities but
+  // must not claim which one an opaque subscription quota meter uses.
+  const rawBaselineProviderInput = Math.max(0, providerInputTokens + netRawSavedTokens);
+  const rawSavedPct = rawBaselineProviderInput > 0
+    ? (netRawSavedTokens / rawBaselineProviderInput) * 100
+    : 0;
   const effectiveSavedInput = effectiveBaselineInput - effectiveActualInput;
   const effectiveSavedPct = effectiveBaselineInput > 0
     ? (effectiveSavedInput / effectiveBaselineInput) * 100
@@ -269,6 +282,8 @@ export function buildCodexEconomicsReport(
     providerOutputTokens,
     cachedTokens,
     cacheSharePct: providerInputTokens > 0 ? round((cachedTokens / providerInputTokens) * 100, 2) : 0,
+    rawBaselineProviderInput: round(rawBaselineProviderInput, 1),
+    rawSavedPct: round(rawSavedPct, 3),
     baselineImagedTokens,
     imageTokens,
     nativeInjectedTokens,
