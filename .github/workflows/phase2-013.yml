@@ -1,0 +1,53 @@
+name: Materialize final 0.13 hardening
+
+on:
+  push:
+    branches: [release/0.13-reliability]
+    paths:
+      - .github/phase2-013.py
+      - .github/workflows/phase2-013.yml
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: phase2-013-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  materialize:
+    if: github.actor != 'github-actions[bot]' && (github.event_name == 'push' || github.head_ref == 'release/0.13-reliability')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: release/0.13-reliability
+          fetch-depth: 0
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271
+        with:
+          version: 10.21.0
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Materialize final hardening
+        run: |
+          python3 .github/phase2-013.py
+          git rm .github/phase2-013.py .github/workflows/phase2-013.yml
+          git diff --check
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run audit
+      - run: pnpm run typecheck
+      - run: pnpm test
+      - run: pnpm run build
+      - name: Commit validated final hardening
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m "feat(reliability): add task-level safeguards and telemetry"
+          git push origin HEAD:release/0.13-reliability
