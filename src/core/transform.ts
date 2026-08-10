@@ -42,7 +42,7 @@ import {
   appendPinBlock, canAppendPinBlock, foldPins, stripPinCommands,
   stripPinCommandsFromSystem, type Pin,
 } from './pin.js';
-import { factSheetText } from './factsheet.js';
+import { factSheetText, extractFactSheetResult, recordFactSheetTelemetry, type FactSheetTelemetry, type FactSheetOptions } from './factsheet.js';
 import { stripSchemaDescriptions, schemaHasStructure } from './schema-strip.js';
 import { bytesToBase64 } from './png.js';
 import {
@@ -449,6 +449,7 @@ export function isCompressionProfitable(
   shrinkWidth: boolean = true,
   maxCharsPerImage: number = READABLE_CHARS_PER_IMAGE,
   geometry?: GateGeometry,
+  factsheetTokens: number = 0,
 ): boolean {
   if (typeof text !== 'string' || text.length === 0) return false;
   const cpt = Number.isFinite(charsPerToken) && charsPerToken > 0
@@ -466,7 +467,7 @@ export function isCompressionProfitable(
   const burnTextSide = Number.isFinite(priorWarmImageTokens) && priorWarmImageTokens > 0
     ? priorWarmImageTokens * (CACHE_CREATE_RATE - CACHE_READ_RATE)
     : 0;
-  return imageTokensCost_ + burnImageSide < textTokensEquivalent + burnTextSide;
+  return imageTokensCost_ + factsheetTokens + burnImageSide < textTokensEquivalent + burnTextSide;
 }
 
 /**
@@ -489,9 +490,10 @@ export function isCompressionProfitableAmortized(
   shrinkWidth: boolean = true,
   maxCharsPerImage: number = READABLE_CHARS_PER_IMAGE,
   geometry?: GateGeometry,
+  factsheetTokens: number = 0,
 ): boolean {
   if (!Number.isFinite(horizon) || horizon <= 1) {
-    return isCompressionProfitable(text, cols, imageCountCap, charsPerToken, priorWarmTokens, priorWarmImageTokens, shrinkWidth, maxCharsPerImage, geometry);
+    return isCompressionProfitable(text, cols, imageCountCap, charsPerToken, priorWarmTokens, priorWarmImageTokens, shrinkWidth, maxCharsPerImage, geometry, factsheetTokens);
   }
   const N = Math.max(2, Math.floor(horizon));
   if (typeof text !== 'string' || text.length === 0) return false;
@@ -501,7 +503,7 @@ export function isCompressionProfitableAmortized(
   const imageTokens = imageTokensCost(text, cols, imageCountCap, shrinkWidth, maxCharsPerImage, geometry);
   const textTokens = text.length / cpt;
   // Worst-case-for-image vs best-case-for-text (conservative, on purpose).
-  const imageLifetime = imageTokens * (CACHE_CREATE_RATE + CACHE_READ_RATE * (N - 1));
+  const imageLifetime = (imageTokens + factsheetTokens) * (CACHE_CREATE_RATE + CACHE_READ_RATE * (N - 1));
   const textLifetime = textTokens * CACHE_READ_RATE * N;
   // Symmetric burn — see isCompressionProfitable for anti-flapping rationale.
   const burnImageSide = Number.isFinite(priorWarmTokens) && priorWarmTokens > 0
@@ -513,6 +515,42 @@ export function isCompressionProfitableAmortized(
   return imageLifetime + burnImageSide < textLifetime + burnTextSide;
 }
 
+
+export function computeLedgerHeadroomTokens(
+  text: string,
+  cols: number = DEFAULTS.cols,
+  imageCountCap?: number,
+  charsPerToken: number = CHARS_PER_TOKEN,
+  priorWarmTokens: number = 0,
+  priorWarmImageTokens: number = 0,
+  shrinkWidth: boolean = true,
+  maxCharsPerImage: number = READABLE_CHARS_PER_IMAGE,
+  geometry?: GateGeometry,
+): number {
+  const cpt = Number.isFinite(charsPerToken) && charsPerToken > 0 ? charsPerToken : CHARS_PER_TOKEN;
+  const imgCost = imageTokensCost(text, cols, imageCountCap, shrinkWidth, maxCharsPerImage, geometry);
+  const textTokens = text.length / cpt;
+  const burnImage = Number.isFinite(priorWarmTokens) && priorWarmTokens > 0
+    ? priorWarmTokens * (CACHE_CREATE_RATE - CACHE_READ_RATE)
+    : 0;
+  const burnText = Number.isFinite(priorWarmImageTokens) && priorWarmImageTokens > 0
+    ? priorWarmImageTokens * (CACHE_CREATE_RATE - CACHE_READ_RATE)
+    : 0;
+  const netSavings = (textTokens + burnText) - (imgCost + burnImage);
+  return Math.max(0, Math.floor(netSavings - 1e-5));
+}
+
+function extractAndRecordFactSheet(
+  text: string,
+  info: TransformInfo,
+  options?: FactSheetOptions,
+): string {
+  const res = extractFactSheetResult(text, options);
+  if (res.telemetry && (res.telemetry.entriesEmitted > 0 || res.telemetry.candidatesDropped > 0 || res.telemetry.budgetDynamicallyReduced)) {
+    recordFactSheetTelemetry(info, res.telemetry);
+  }
+  return res.text;
+}
 
 /** Increment a passthrough-reason counter on `info`. Lazily allocates `passthroughReasons`. */
 function bumpPassthrough(
@@ -720,6 +758,8 @@ export interface TransformInfo {
   collapsedChars?: number;
   /** History-collapse images. Also folded into `info.imageCount`. */
   collapsedImages?: number;
+  /** Factsheet / precision ledger extraction telemetry for this request. */
+  factsheetTelemetry?: FactSheetTelemetry;
   /** sha8 of concatenated history-image base64. Stable across the collapse window →
    *  proves Anthropic's prompt cache can `cache_read` (0.1×) instead of `cache_create`.
    *  A changing hash means cache-key drift is back. Only set when collapse produced images. */
@@ -2282,6 +2322,9 @@ export async function transformRequest(
       profitable: slabGateEval.profitable,
     };
   }
+  const slabHeadroomTokens = computeLedgerHeadroomTokens(
+    combinedWithHeader, slabCols, undefined, slabCpt, o.priorWarmTokens, o.priorWarmImageTokens, false, READABLE_CHARS_PER_IMAGE, denseGeo
+  );
   if (!isCompressionProfitable(
     combinedWithHeader,
     slabCols,
@@ -2292,6 +2335,7 @@ export async function transformRequest(
     false,
     READABLE_CHARS_PER_IMAGE,
     denseGeo,
+    0,
   )) {
     info.reason = `not_profitable (slab=${combined.length} chars)`;
     bumpPassthrough(info, 'not_profitable');
@@ -2305,6 +2349,25 @@ export async function transformRequest(
     // describe a request we are no longer sending, so forwarding them would put
     // the raw `@pxpipe pin` line back and drop the tail block.
     return { body: pinsRewrote ? finalized.body : body, info };
+  }
+
+  let slabFsRes = extractFactSheetResult(combinedRaw, { tokenHeadroom: slabHeadroomTokens, charsPerToken: slabCpt });
+  if (!isCompressionProfitable(
+    combinedWithHeader, slabCols, undefined, slabCpt, o.priorWarmTokens, o.priorWarmImageTokens, false, READABLE_CHARS_PER_IMAGE, denseGeo, slabFsRes.telemetry.approxTokens
+  )) {
+    slabFsRes = extractFactSheetResult(combinedRaw, { tokenHeadroom: 0, charsPerToken: slabCpt });
+    if (!isCompressionProfitable(
+      combinedWithHeader, slabCols, undefined, slabCpt, o.priorWarmTokens, o.priorWarmImageTokens, false, READABLE_CHARS_PER_IMAGE, denseGeo, slabFsRes.telemetry.approxTokens
+    )) {
+      info.reason = `not_profitable (slab=${combined.length} chars)`;
+      bumpPassthrough(info, 'not_profitable');
+      const finalized = await runHistoryCollapseAndFinalize(req, info, o, opts, droppedCodepoints, pins);
+      if (finalized.collapsed) {
+        info.compressed = true;
+        return { body: finalized.body, info };
+      }
+      return { body: pinsRewrote ? finalized.body : body, info };
+    }
   }
 
   // Instruction header co-renders into the same PNG (+1.04pp L1 OCR vs baseline;
@@ -2409,7 +2472,10 @@ export async function transformRequest(
       // byte-identically next turn. Rendering them lost more to cache misses
       // than it saved in tokens, so the path is gone rather than flag-gated.
 
-      const slabFactSheet = factSheetText(combinedRaw);
+      if (slabFsRes.telemetry && (slabFsRes.telemetry.entriesEmitted > 0 || slabFsRes.telemetry.candidatesDropped > 0 || slabFsRes.telemetry.budgetDynamicallyReduced)) {
+        recordFactSheetTelemetry(info, slabFsRes.telemetry);
+      }
+      const slabFactSheet = slabFsRes.text;
       m.content = [
         ...imageBlocks,
         ...(slabFactSheet ? [{ type: 'text' as const, text: slabFactSheet }] : []),
@@ -2453,10 +2519,13 @@ export async function transformRequest(
               const inner = compactSlabWhitespace(innerRaw);
               // classifyContent sees pre-reflow `inner` so shape bucketing reflects real structure.
               const innerR = maybeReflow(inner, o.reflow);
+              const trHeadroom = computeLedgerHeadroomTokens(
+                innerR, denseGeo.cols, o.maxImagesPerToolResult, o.charsPerToken, 0, 0, true, denseGeo.maxChars, denseGeo
+              );
               if (innerR.length < o.minToolResultChars) {
                 bumpPassthrough(info, 'below_threshold');
                 rewritten.push(blk);
-              } else if (!isCompressionProfitable(innerR, denseGeo.cols, o.maxImagesPerToolResult, o.charsPerToken, 0, 0, true, denseGeo.maxChars, denseGeo)) {
+              } else if (!isCompressionProfitable(innerR, denseGeo.cols, o.maxImagesPerToolResult, o.charsPerToken, 0, 0, true, denseGeo.maxChars, denseGeo, 0)) {
                 bumpPassthrough(info, 'not_profitable');
                 rewritten.push(blk);
               } else {
@@ -2515,7 +2584,14 @@ export async function transformRequest(
                 for (const [cp, n] of dcp) {
                   droppedCodepoints.set(cp, (droppedCodepoints.get(cp) ?? 0) + n);
                 }
-                const trFactSheet = factSheetText(innerRaw);
+                let trFsRes = extractFactSheetResult(innerRaw, { tokenHeadroom: trHeadroom, charsPerToken: o.charsPerToken });
+                if (!isCompressionProfitable(innerR, denseGeo.cols, o.maxImagesPerToolResult, o.charsPerToken, 0, 0, true, denseGeo.maxChars, denseGeo, trFsRes.telemetry.approxTokens)) {
+                  trFsRes = extractFactSheetResult(innerRaw, { tokenHeadroom: 0, charsPerToken: o.charsPerToken });
+                }
+                if (trFsRes.telemetry && (trFsRes.telemetry.entriesEmitted > 0 || trFsRes.telemetry.candidatesDropped > 0 || trFsRes.telemetry.budgetDynamicallyReduced)) {
+                  recordFactSheetTelemetry(info, trFsRes.telemetry);
+                }
+                const trFactSheet = trFsRes.text;
                 rewritten.push({
                   ...tr,
                   content: trFactSheet ? [...imgs, { type: 'text' as const, text: trFactSheet }] : imgs,
@@ -2554,12 +2630,15 @@ export async function transformRequest(
                 const innerText = compactSlabWhitespace(innerTextRaw);
                 // R3: gate/page/render on reflowed text; classify pre-reflow.
                 const innerTextR = maybeReflow(innerText, o.reflow);
+                const partHeadroom = computeLedgerHeadroomTokens(
+                  innerTextR, denseGeo.cols, o.maxImagesPerToolResult, o.charsPerToken, 0, 0, true, denseGeo.maxChars, denseGeo
+                );
                 if (innerTextR.length < o.minToolResultChars) {
                   bumpPassthrough(info, 'below_threshold');
                   newInner.push(ib as TextBlock | ImageBlock);
                   continue;
                 }
-                if (!isCompressionProfitable(innerTextR, denseGeo.cols, o.maxImagesPerToolResult, o.charsPerToken, 0, 0, true, denseGeo.maxChars, denseGeo)) {
+                if (!isCompressionProfitable(innerTextR, denseGeo.cols, o.maxImagesPerToolResult, o.charsPerToken, 0, 0, true, denseGeo.maxChars, denseGeo, 0)) {
                   bumpPassthrough(info, 'not_profitable');
                   newInner.push(ib as TextBlock | ImageBlock);
                   continue;
@@ -2610,7 +2689,14 @@ export async function transformRequest(
                   newInner.push(out as ImageBlock);
                   info.imageBytes += approxBlockBytes(img);
                 }
-                const partFactSheet = factSheetText(innerTextRaw);
+                let partFsRes = extractFactSheetResult(innerTextRaw, { tokenHeadroom: partHeadroom, charsPerToken: o.charsPerToken });
+                if (!isCompressionProfitable(innerTextR, denseGeo.cols, o.maxImagesPerToolResult, o.charsPerToken, 0, 0, true, denseGeo.maxChars, denseGeo, partFsRes.telemetry.approxTokens)) {
+                  partFsRes = extractFactSheetResult(innerTextRaw, { tokenHeadroom: 0, charsPerToken: o.charsPerToken });
+                }
+                if (partFsRes.telemetry && (partFsRes.telemetry.entriesEmitted > 0 || partFsRes.telemetry.candidatesDropped > 0 || partFsRes.telemetry.budgetDynamicallyReduced)) {
+                  recordFactSheetTelemetry(info, partFsRes.telemetry);
+                }
+                const partFactSheet = partFsRes.text;
                 if (partFactSheet) newInner.push({ type: 'text', text: partFactSheet });
                 info.imagePixels = (info.imagePixels ?? 0) + pixels;
                 info.toolResultImgs = (info.toolResultImgs ?? 0) + imgs.length;

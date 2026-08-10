@@ -299,6 +299,54 @@ describe('transformGoogleGenerateContent', () => {
     expect(JSON.stringify(out)).not.toContain('src/file-1199.ts:1200');
   });
 
+  it('aggregates factsheet telemetry across multiple compressed Google tool results', async () => {
+    const result1 = Array.from({ length: 600 }, (_, i) => `tool1/src/file_${i}.ts:${i * 2}: res_1_val_${i}`).join('\n');
+    const result2 = Array.from({ length: 600 }, (_, i) => `tool2/src/file_${i}.ts:${i * 3}: res_2_val_${i}`).join('\n');
+
+    const sampleBody = {
+      systemInstruction: { parts: [{ text: 'Coding assistant system prompt.' }] },
+      contents: [
+        { role: 'user', parts: [{ text: 'Run searches.' }] },
+        { role: 'model', parts: [{ functionCall: { name: 'tool1', args: {} } }] },
+        {
+          role: 'user',
+          parts: [{
+            functionResponse: {
+              name: 'tool1',
+              response: { name: 'tool1', content: result1 },
+            },
+          }],
+        },
+        { role: 'model', parts: [{ functionCall: { name: 'tool2', args: {} } }] },
+        {
+          role: 'user',
+          parts: [{
+            functionResponse: {
+              name: 'tool2',
+              response: { name: 'tool2', content: result2 },
+            },
+          }],
+        },
+      ],
+    };
+
+    const out = await transformGoogleGenerateContent(
+      new TextEncoder().encode(JSON.stringify(sampleBody)),
+      'gemini-3.6-flash',
+      { compress: true, collapseHistory: false, minToolResultChars: 100 },
+    );
+
+    expect(out.info.compressed).toBe(true);
+    expect(out.info.toolResultImgs).toBeGreaterThanOrEqual(2);
+    expect(out.info.factsheetTelemetry).toBeDefined();
+
+    const telem = out.info.factsheetTelemetry!;
+    // Assert final telemetry equals aggregate of both tool results rather than only the first
+    expect(telem.entriesEmitted).toBeGreaterThan(60);
+    expect(telem.approxChars).toBeGreaterThan(500);
+    expect(telem.approxTokens).toBeGreaterThan(100);
+  });
+
   it.each([
     'null',
     '[]',

@@ -29,7 +29,13 @@ import {
   HISTORY_TRANSCRIPT_INTRO,
   HISTORY_TRANSCRIPT_OUTRO,
 } from './openai.js';
-import { factSheetText } from './factsheet.js';
+import {
+  extractFactSheetResult,
+  mergeFactSheetTelemetry,
+  recordFactSheetTelemetry,
+  type FactSheetResult,
+  type FactSheetTelemetry,
+} from './factsheet.js';
 import { stripSchemaDescriptions } from './schema-strip.js';
 
 export interface GooglePart {
@@ -114,6 +120,7 @@ interface GoogleHistoryPlan {
   imageSources: string[];
   text: string;
   factSheet: string;
+  telemetry?: FactSheetTelemetry;
   baselineTokens: number;
   nativeTokens: number;
   collapsedTurns: number;
@@ -131,6 +138,7 @@ interface GoogleToolResultPlan {
   bucketChars: Partial<Record<'tool_result_json' | 'tool_result_log' | 'tool_result_prose', number>>;
   droppedChars: number;
   droppedCodepoints: Map<number, number>;
+  telemetry?: FactSheetTelemetry;
 }
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -286,6 +294,8 @@ async function compressGoogleToolResults(
   let droppedChars = 0;
   let changed = false;
 
+  let planTelemetry: FactSheetTelemetry | undefined;
+
   const rewrittenContents: GoogleContent[] = [];
   for (const content of contents) {
     if (!Array.isArray(content.parts)) {
@@ -331,15 +341,46 @@ async function compressGoogleToolResults(
         (sum, image) => sum + geminiVisionTokens(modelName, image.width, image.height),
         0,
       );
-      const sheet = factSheetText(raw, profile.factSheetFormat);
-      const pointer = `The completed ${name} tool result is rendered in the attached image part(s).` +
-        (sheet ? `\n${sheet}` : '');
+
+      const pointerBase = `The completed ${name} tool result is rendered in the attached image part(s).`;
       const textTokens = googleTextTokens(raw);
-      const pointerTokens = googleTextTokens(pointer);
       const maxRatio = Math.min(1, Math.max(0.05, options.googleMaxImageToTextRatio ?? 1));
+      const maxNativeTokensAllowed = Math.floor(textTokens * maxRatio - imageTokens - 1e-5);
+      const pointerBaseTokens = googleTextTokens(pointerBase);
+
+      let trFsRes: FactSheetResult | null = null;
+      if (maxNativeTokensAllowed >= pointerBaseTokens) {
+        const headroomTokens = maxNativeTokensAllowed - pointerBaseTokens;
+        trFsRes = extractFactSheetResult(raw, {
+          tokenHeadroom: headroomTokens,
+          charsPerToken: 3.5,
+          format: profile.factSheetFormat,
+        });
+        const pointer = pointerBase + (trFsRes.text ? `\n${trFsRes.text}` : '');
+        if (imageTokens + googleTextTokens(pointer) >= textTokens * maxRatio) {
+          trFsRes = extractFactSheetResult(raw, {
+            tokenHeadroom: 0,
+            charsPerToken: 3.5,
+            format: profile.factSheetFormat,
+          });
+        }
+      }
+
+      const sheet = trFsRes?.text ?? '';
+      const pointer = pointerBase + (sheet ? `\n${sheet}` : '');
+      const pointerTokens = googleTextTokens(pointer);
       if (imageTokens + pointerTokens >= textTokens * maxRatio) {
         rewrittenParts.push(rawPart);
         continue;
+      }
+
+      if (
+        trFsRes?.telemetry &&
+        (trFsRes.telemetry.entriesEmitted > 0 ||
+          trFsRes.telemetry.candidatesDropped > 0 ||
+          trFsRes.telemetry.budgetDynamicallyReduced)
+      ) {
+        planTelemetry = mergeFactSheetTelemetry(planTelemetry, trFsRes.telemetry);
       }
 
       rewrittenParts.push({
@@ -382,6 +423,7 @@ async function compressGoogleToolResults(
     bucketChars,
     droppedChars,
     droppedCodepoints,
+    telemetry: planTelemetry,
   };
 }
 
@@ -456,12 +498,39 @@ async function planGoogleHistory(
     (sum, image) => sum + geminiVisionTokens(modelName, image.width, image.height),
     0,
   );
-  const factSheet = factSheetText(text, profile.factSheetFormat);
-  const nativeTokens = googleTextTokens(
-    HISTORY_TRANSCRIPT_INTRO + factSheet + HISTORY_TRANSCRIPT_OUTRO,
+  const introOutroTokens = googleTextTokens(
+    HISTORY_TRANSCRIPT_INTRO + HISTORY_TRANSCRIPT_OUTRO,
   );
   const maxRatio = Math.min(1, Math.max(0.05, maxImageToTextRatio));
-  if (imageTokens + nativeTokens >= baselineTokens * maxRatio) return null;
+  const maxNativeTokensAllowed = Math.floor(baselineTokens * maxRatio - imageTokens - 1e-5);
+  if (maxNativeTokensAllowed < introOutroTokens) return null;
+
+  const headroomTokens = maxNativeTokensAllowed - introOutroTokens;
+  let fsRes = extractFactSheetResult(text, {
+    tokenHeadroom: headroomTokens,
+    charsPerToken: 3.5,
+    format: profile.factSheetFormat,
+  });
+
+  let nativeTokens = googleTextTokens(
+    HISTORY_TRANSCRIPT_INTRO + fsRes.text + HISTORY_TRANSCRIPT_OUTRO,
+  );
+
+  if (imageTokens + nativeTokens >= baselineTokens * maxRatio) {
+    fsRes = extractFactSheetResult(text, {
+      tokenHeadroom: 0,
+      charsPerToken: 3.5,
+      format: profile.factSheetFormat,
+    });
+    nativeTokens = googleTextTokens(
+      HISTORY_TRANSCRIPT_INTRO + fsRes.text + HISTORY_TRANSCRIPT_OUTRO,
+    );
+    if (imageTokens + nativeTokens >= baselineTokens * maxRatio) {
+      return null;
+    }
+  }
+
+  const factSheet = fsRes.text;
   const droppedCodepoints = new Map<number, number>();
   let droppedChars = 0;
   for (const image of images) {
@@ -477,6 +546,7 @@ async function planGoogleHistory(
     imageSources: images.map(() => text),
     text,
     factSheet,
+    telemetry: fsRes.telemetry,
     baselineTokens,
     nativeTokens,
     collapsedTurns: boundary + 1 - start,
@@ -594,9 +664,29 @@ export async function transformGoogleGenerateContent(
       googleTextTokens(authorityText)
         + Math.max(0, toolRewrite.originalTokens - toolRewrite.rewrittenTokens),
     );
-    fsText = factSheetText(combinedRaw, profile.factSheetFormat);
+    const maxRatio = Math.min(1, Math.max(0.05, options.googleMaxImageToTextRatio ?? 1));
+    const systemPointerTokens = googleTextTokens(SYSTEM_POINTER);
+    const maxNativeTokensAllowed = Math.floor(textTokens * maxRatio - imageTokens - 1e-5);
+    let slabFsRes: FactSheetResult | null = null;
+    if (maxNativeTokensAllowed >= systemPointerTokens) {
+      const headroomTokens = maxNativeTokensAllowed - systemPointerTokens;
+      slabFsRes = extractFactSheetResult(combinedRaw, {
+        tokenHeadroom: headroomTokens,
+        charsPerToken: 3.5,
+        format: profile.factSheetFormat,
+      });
+      const nativeText = SYSTEM_POINTER + (slabFsRes.text ? slabFsRes.text : '');
+      if (imageTokens + googleTextTokens(nativeText) >= textTokens * maxRatio) {
+        slabFsRes = extractFactSheetResult(combinedRaw, {
+          tokenHeadroom: 0,
+          charsPerToken: 3.5,
+          format: profile.factSheetFormat,
+        });
+      }
+    }
+    fsText = slabFsRes?.text ?? null;
     const nativeText = SYSTEM_POINTER + (fsText ?? '');
-    nativeInjectedTokens = Math.ceil(nativeText.length / 3.5);
+    nativeInjectedTokens = googleTextTokens(nativeText);
 
     info.gateEval = {
       site: 'slab',
@@ -604,13 +694,20 @@ export async function transformGoogleGenerateContent(
       textTokens,
       burnImageSide: nativeInjectedTokens,
       burnTextSide: 0,
-      profitable: imageTokens + nativeInjectedTokens < textTokens * Math.min(
-        1,
-        Math.max(0.05, options.googleMaxImageToTextRatio ?? 1),
-      ),
+      profitable: imageTokens + nativeInjectedTokens < textTokens * maxRatio,
     };
     staticProfitable = info.gateEval.profitable
       && !(options.requireLosslessRender && staticDroppedChars > 0);
+
+    if (
+      staticProfitable &&
+      slabFsRes?.telemetry &&
+      (slabFsRes.telemetry.entriesEmitted > 0 ||
+        slabFsRes.telemetry.candidatesDropped > 0 ||
+        slabFsRes.telemetry.budgetDynamicallyReduced)
+    ) {
+      recordFactSheetTelemetry(info, slabFsRes.telemetry);
+    }
   }
 
   // Build static image parts if static slab is profitable
@@ -762,6 +859,14 @@ export async function transformGoogleGenerateContent(
   info.imageSourceTexts = effectiveStaticImages.map(() => info.imageSourceText);
 
   if (historyPlan) {
+      if (
+        historyPlan.telemetry &&
+        (historyPlan.telemetry.entriesEmitted > 0 ||
+          historyPlan.telemetry.candidatesDropped > 0 ||
+          historyPlan.telemetry.budgetDynamicallyReduced)
+      ) {
+        recordFactSheetTelemetry(info, historyPlan.telemetry);
+      }
       const historyImageTokens = historyPlan.images.reduce(
         (sum, image) => sum + geminiVisionTokens(modelName, image.width, image.height),
         0,
@@ -794,6 +899,14 @@ export async function transformGoogleGenerateContent(
   }
 
   if (toolResultPlan.images.length > 0) {
+    if (
+      toolResultPlan.telemetry &&
+      (toolResultPlan.telemetry.entriesEmitted > 0 ||
+        toolResultPlan.telemetry.candidatesDropped > 0 ||
+        toolResultPlan.telemetry.budgetDynamicallyReduced)
+    ) {
+      recordFactSheetTelemetry(info, toolResultPlan.telemetry);
+    }
     const resultImageTokens = toolResultPlan.images.reduce(
       (sum, image) => sum + geminiVisionTokens(modelName, image.width, image.height),
       0,

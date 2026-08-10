@@ -3,8 +3,11 @@ import {
   extractFactSheetTokens,
   extractFactSheetEntries,
   extractFactSheetEntriesAllPages,
+  extractFactSheetResult,
+  isSecretOrCredential,
   factSheetText,
 } from '../src/core/factsheet.js';
+import { isCompressionProfitable } from '../src/core/transform.js';
 
 describe('factsheet extraction', () => {
   it('captures precision-critical, hard-to-OCR tokens', () => {
@@ -197,5 +200,176 @@ describe('ticket-style codes and occurrence counts', () => {
       expect(toks, `missing ${need}`).toContain(need);
     }
   });
+});
 
+describe('precision ledger features & security', () => {
+  it('extracts snake_case, camelCase/PascalCase, path+line, key-colon-value, and quoted literals', () => {
+    const text = [
+      'File src/core/render.ts:512 was updated',
+      'Returned status: 404 with model: "gemini-3.6-flash-high"',
+      'PORT=47821 set in config',
+      'Function getUserById called FactSheetEntry on token_ledger_shard',
+    ].join('\n');
+
+    const toks = extractFactSheetTokens(text);
+    expect(toks).toContain('src/core/render.ts:512');
+    expect(toks).toContain('status: 404');
+    expect(toks).toContain('PORT=47821');
+    expect(toks).toContain('gemini-3.6-flash-high');
+    expect(toks).toContain('getUserById');
+    expect(toks).toContain('FactSheetEntry');
+    expect(toks).toContain('token_ledger_shard');
+  });
+
+  it('extracts hashes, UUIDs, versions, and CLI flags', () => {
+    const text = [
+      'commit 6d80bd6 verified',
+      'session id 12345678-1234-1234-1234-123456789abc active',
+      'running release v1.2.3 with --max-tokens 96',
+    ].join('\n');
+
+    const toks = extractFactSheetTokens(text);
+    expect(toks).toContain('6d80bd6');
+    expect(toks).toContain('12345678-1234-1234-1234-123456789abc');
+    expect(toks).toContain('v1.2.3');
+    expect(toks).toContain('--max-tokens');
+  });
+
+  it('never surfaces secrets, bearer tokens, private keys, or API keys in the ledger', () => {
+    const text = [
+      'api_key=sk-proj-1234567890abcdef1234567890abcdef',
+      'Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature',
+      'ghp_1234567890abcdef1234567890abcdef1234',
+      'password=secretSuperPass123',
+      '-----BEGIN PRIVATE KEY----- MIIEvgIBADANBg... -----END PRIVATE KEY-----',
+    ].join('\n');
+
+    const toks = extractFactSheetTokens(text);
+    expect(toks).not.toContain('sk-proj-1234567890abcdef1234567890abcdef');
+    expect(toks).not.toContain('ghp_1234567890abcdef1234567890abcdef1234');
+    expect(toks).not.toContain('password=secretSuperPass123');
+    for (const t of toks) {
+      expect(t.startsWith('sk-')).toBe(false);
+      expect(t.startsWith('ghp_')).toBe(false);
+      expect(t.startsWith('Bearer')).toBe(false);
+    }
+  });
+
+  it('preserves first-use ordering within priority tiers and is byte-identical', () => {
+    const text = 'src/core/render.ts:512 status: 404 PORT=47821 src/core/factsheet.ts:120';
+    const res1 = extractFactSheetResult(text);
+    const res2 = extractFactSheetResult(text);
+
+    expect(res1.text).toBe(res2.text);
+    const tokens = res1.kept.map((e) => e.token);
+    expect(tokens.indexOf('src/core/render.ts:512')).toBeLessThan(tokens.indexOf('src/core/factsheet.ts:120'));
+  });
+
+  it('supports dynamic smaller and larger budgets via FactSheetOptions', () => {
+    const text = Array.from({ length: 50 }, (_, i) => `item_${i}_code=${1000 + i}`).join(' ');
+
+    const small = extractFactSheetResult(text, { maxTokens: 5 });
+    expect(small.kept.length).toBe(5);
+    expect(small.telemetry.candidatesDropped).toBeGreaterThan(0);
+
+    const large = extractFactSheetResult(text, { maxTokens: 100 });
+    expect(large.kept.length).toBe(50);
+  });
+
+  it('evaluates profitability when factsheet token overhead is included', () => {
+    const sourceText = 'function processData() {\n  const token_ledger_shard = 47821;\n  return token_ledger_shard;\n}\n'.repeat(40);
+    const fsRes = extractFactSheetResult(sourceText);
+    const fsTokens = fsRes.telemetry.approxTokens;
+
+    const profitable = isCompressionProfitable(
+      sourceText,
+      80,
+      undefined,
+      4,
+      0,
+      0,
+      true,
+      2000,
+      undefined,
+      fsTokens,
+    );
+    expect(profitable).toBe(true);
+  });
+
+  it('safely keeps native text when ledger overhead makes transform unprofitable', () => {
+    const shortText = 'const status_code = 404; // small text';
+    const fsRes = extractFactSheetResult(shortText);
+    const fsTokens = fsRes.telemetry.approxTokens;
+
+    const profitable = isCompressionProfitable(
+      shortText,
+      80,
+      undefined,
+      4,
+      0,
+      0,
+      true,
+      2000,
+      undefined,
+      fsTokens,
+    );
+    expect(profitable).toBe(false);
+  });
+
+  it('rejects secrets, bindings, and sensitive sub-tokens (password=secretSuperPass123, api_key=ordinaryCamelCaseSecret42, Bearer, Cookie, JWT, ghp_, sk-), while bare LIVEKIT_API_SECRET remains eligible', () => {
+    const secretText = [
+      'password=secretSuperPass123',
+      'api_key=ordinaryCamelCaseSecret42',
+      'Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature',
+      'Cookie: session=s%3A1234567890abcdef',
+      'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature',
+      'ghp_1234567890abcdef1234567890abcdef1234',
+      'sk-proj-1234567890abcdef1234567890abcdef',
+      'LIVEKIT_API_SECRET',
+    ].join('\n');
+
+    const toks = extractFactSheetTokens(secretText);
+
+    expect(toks).not.toContain('password=secretSuperPass123');
+    expect(toks).not.toContain('secretSuperPass123');
+    expect(toks).not.toContain('api_key=ordinaryCamelCaseSecret42');
+    expect(toks).not.toContain('ordinaryCamelCaseSecret42');
+    expect(toks).not.toContain('s%3A1234567890abcdef');
+    expect(toks).not.toContain('ghp_1234567890abcdef1234567890abcdef1234');
+    expect(toks).not.toContain('sk-proj-1234567890abcdef1234567890abcdef');
+
+    for (const t of toks) {
+      expect(t.toLowerCase()).not.toContain('secretsuperpass123');
+      expect(t.toLowerCase()).not.toContain('ordinarycamelcasesecret42');
+      expect(t.toLowerCase()).not.toContain('eyjhbgcioi...'.slice(0, 10));
+      expect(t.startsWith('sk-')).toBe(false);
+      expect(t.startsWith('ghp_')).toBe(false);
+      expect(t.startsWith('Bearer')).toBe(false);
+    }
+
+    expect(toks).toContain('LIVEKIT_API_SECRET');
+  });
+
+  it('deduplicates multi-pattern matches per span in page-aware path', () => {
+    const text = 'v1.2.3 status: 404 getUserById render.ts:512';
+    const res = extractFactSheetEntriesAllPages(text, 28_080);
+    for (const entry of res.kept) {
+      expect(entry.count, `Token ${entry.token} double-counted`).toBe(1);
+    }
+  });
+
+  it('enforces hard ceiling MAX_ENTRIES when absurd maxTokens is requested', () => {
+    const items = Array.from({ length: 400 }, (_, i) => `item_code_${i}_val=${1000 + i}`).join(' ');
+    const res = extractFactSheetResult(items, { maxTokens: 1_000_000 });
+    expect(res.kept.length).toBeLessThanOrEqual(256);
+  });
+
+  it('preserves telemetry reporting entriesEmitted: 0, candidatesDropped > 0, budgetDynamicallyReduced: true when headroom is 0', () => {
+    const text = 'user_account_id = 42; item_code_val = 100;';
+    const res = extractFactSheetResult(text, { tokenHeadroom: 0 });
+    expect(res.kept.length).toBe(0);
+    expect(res.telemetry.entriesEmitted).toBe(0);
+    expect(res.telemetry.candidatesDropped).toBeGreaterThan(0);
+    expect(res.telemetry.budgetDynamicallyReduced).toBe(true);
+  });
 });
