@@ -15,7 +15,12 @@ import {
 } from './render.js';
 import { geminiVisionTokens, isGeminiModel, resolveGeminiProfile } from './gemini-model-profiles.js';
 import { bytesToBase64 } from './png.js';
-import { classifyContent, compactSlabWhitespace, type TransformInfo } from './transform.js';
+import {
+  classifyContent,
+  compactSlabWhitespace,
+  type TransformInfo,
+  type TransformOptions,
+} from './transform.js';
 import {
   prepareImagedRenderText,
   droppedCodepointsTop,
@@ -411,10 +416,16 @@ async function planGoogleHistory(
   contents: GoogleContent[],
   modelName: string,
   reflowEnabled: boolean,
+  tuning: NonNullable<TransformOptions['googleHistory']> = {},
 ): Promise<GoogleHistoryPlan | null> {
   const profile = resolveGeminiProfile();
+  const keepTail = Math.max(0, Math.floor(tuning.keepTail ?? profile.history.keepTail));
+  const minCollapseUnits = Math.max(1, Math.floor(tuning.minCollapseUnits ?? 10));
+  const minCollapseTokens = Math.max(1, Math.floor(
+    tuning.minCollapseTokens ?? profile.history.minCollapseTokens,
+  ));
   const units = contents.map(googleHistoryUnit);
-  const cutoff = Math.max(0, units.length - profile.history.keepTail);
+  const cutoff = Math.max(0, units.length - keepTail);
   // In autonomous OpenCode turns the user's live task can be the oldest item,
   // followed by a long tool loop. Keep that request native instead of making it OCR-only.
   let latestPlainUser = -1;
@@ -430,11 +441,11 @@ async function planGoogleHistory(
     ? latestPlainUser + 1
     : 0;
   const boundary = googleClosedBoundary(units, start, cutoff);
-  if (boundary < start || boundary + 1 - start < 10) return null;
+  if (boundary < start || boundary + 1 - start < minCollapseUnits) return null;
   const selected = units.slice(start, boundary + 1);
   const text = selected.map((unit) => unit.text).filter(Boolean).join('\n\n');
   const baselineTokens = selected.reduce((sum, unit) => sum + unit.baselineTokens, 0);
-  if (!text || baselineTokens < profile.history.minCollapseTokens) return null;
+  if (!text || baselineTokens < minCollapseTokens) return null;
   const safe = neutralizeSentinel(text);
   const renderedText = reflowEnabled ? reflow(safe) ?? safe : safe;
   const images = await renderTextToPngs(
@@ -488,22 +499,7 @@ function imagePart(image: RenderedImage): GooglePart {
 export async function transformGoogleGenerateContent(
   bodyBytes: Uint8Array,
   modelName: string,
-  options: {
-    compress?: boolean;
-    compressTools?: boolean;
-    compressToolResults?: boolean;
-    collapseHistory?: boolean;
-    minToolResultChars?: number;
-    maxImagesPerToolResult?: number;
-    cols?: number;
-    reflow?: boolean;
-    /** Same static-context eligibility threshold used by the cross-provider
-     * reliability profiles. coding-safe/balanced set this to MAX_SAFE_INTEGER
-     * so system/developer authority remains native. */
-    minCompressChars?: number;
-    /** Refuse any candidate for which the renderer reports dropped characters. */
-    requireLosslessRender?: boolean;
-  } = {},
+  options: TransformOptions = {},
 ): Promise<{ body: Uint8Array; info: TransformInfo }> {
   if (!isGeminiModel(modelName)) {
     const info = createDefaultInfo(modelName);
@@ -636,13 +632,26 @@ export async function transformGoogleGenerateContent(
 
   const plannedHistory = options.collapseHistory === false
     ? null
-    : await planGoogleHistory(originalContents, modelName, options.reflow !== false);
+    : await planGoogleHistory(
+        originalContents,
+        modelName,
+        options.reflow !== false,
+        options.googleHistory,
+      );
   const historyRenderLossy = Boolean(
     plannedHistory
       && options.requireLosslessRender
       && plannedHistory.droppedChars > 0,
   );
   const historyPlan = historyRenderLossy ? null : plannedHistory;
+  if (options.collapseHistory !== false && !historyPlan) {
+    const keepTail = Math.max(0, Math.floor(
+      options.googleHistory?.keepTail ?? profile.history.keepTail,
+    ));
+    info.historyReason = historyRenderLossy
+      ? 'render_lossy'
+      : originalContents.length > keepTail ? 'not_profitable' : 'no_history';
+  }
   let contents = originalContents;
   if (historyPlan) {
     const historyParts: GooglePart[] = [
@@ -774,7 +783,10 @@ export async function transformGoogleGenerateContent(
       info.droppedCodepointsTop = droppedCodepointsTop(historyPlan.droppedCodepoints)
         ?? info.droppedCodepointsTop;
   } else if (options.collapseHistory !== false) {
-    info.historyReason = originalContents.length > profile.history.keepTail
+    const keepTail = Math.max(0, Math.floor(
+      options.googleHistory?.keepTail ?? profile.history.keepTail,
+    ));
+    info.historyReason = originalContents.length > keepTail
       ? 'not_profitable'
       : 'no_history';
   }

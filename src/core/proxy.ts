@@ -4,7 +4,12 @@
  */
 
 import { markCacheDead, noteCacheOutcome, responseLeftNoCache } from './session-state.js';
-import { noteTrajectoryCompression, observeAnthropicTrajectory, type TrajectoryObservation } from './trajectory.js';
+import {
+  noteTrajectoryCompression,
+  observeAnthropicTrajectory,
+  observeGoogleTrajectory,
+  type TrajectoryObservation,
+} from './trajectory.js';
 import { applyTrajectoryCircuitBreaker } from './trajectory-policy.js';
 import { transformRequest, type TransformOptions, type TransformInfo } from './transform.js';
 import { isClaudeModel, transformOpenAIChatCompletions, transformOpenAIResponses } from './openai.js';
@@ -1369,6 +1374,12 @@ export function createProxy(config: ProxyConfig = {}) {
         requestModel = model ?? undefined;
         if (isMessages) {
           trajectory = await observeAnthropicTrajectory(bodyIn, requestModel);
+        } else if (isGoogle) {
+          trajectory = await observeGoogleTrajectory(
+            bodyIn,
+            requestModel,
+            isAntigravityRoute,
+          );
         }
         // A turn whose only content is `@pxpipe pin` / `@pxpipe unpin` is
         // configuration, not a question. Answer it here: forwarding it would bill
@@ -1496,12 +1507,6 @@ export function createProxy(config: ProxyConfig = {}) {
             : isOpenAIChat
               ? await transformOpenAIChatCompletions(bodyIn, effectiveOpts)
               : await transformOpenAIResponses(bodyIn, effectiveOpts);
-        if (trajectory) {
-          noteTrajectoryCompression(
-            trajectory.sessionSha8,
-            Boolean(r.info.compressed && (r.info.imageCount ?? 0) > 0),
-          );
-        }
         if (isGoogle && !isAntigravityRoute && r.info.compressed) {
           const countHeaders = applyGatewayHeaders(filterHeaders(req.headers, STRIP_REQ_HEADERS));
           countHeaders.set('content-type', 'application/json');
@@ -1538,6 +1543,17 @@ export function createProxy(config: ProxyConfig = {}) {
             r.info.baselineTokens = baseline;
             r.info.baselineProbeStatus = 'ok';
           }
+        }
+        // Arm the repeated-retrieval breaker only after the FINAL body decision.
+        // Public Google can still revert an initially rendered candidate after its
+        // provider countTokens validation; marking compression before that revert
+        // falsely blamed later repeated reads on a modality change the model never saw.
+        if (trajectory) {
+          r.info.firstUserSha8 ??= trajectory.sessionSha8;
+          noteTrajectoryCompression(
+            trajectory.sessionSha8,
+            Boolean(r.info.compressed && (r.info.imageCount ?? 0) > 0),
+          );
         }
         if (!modelOk) r.info.reason = skipReason ?? 'unsupported_model';
         if (r.info.compressed) {

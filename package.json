@@ -1,6 +1,6 @@
 {
   "name": "pxpipe-proxy",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "description": "Token-saving proxy for Claude Code: renders bulky context (system prompt, tool docs, old history) as dense PNGs to cut input tokens. Runs on Node and Cloudflare Workers.",
   "type": "module",
   "bin": {
@@ -73,7 +73,7 @@
     "cloudflare-workers"
   ],
   "engines": {
-    "node": ">=18"
+    "node": ">=20.19.0"
   },
   "packageManager": "pnpm@10.21.0",
   "license": "MIT",

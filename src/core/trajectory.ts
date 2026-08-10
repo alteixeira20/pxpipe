@@ -31,6 +31,10 @@ interface SessionState {
   readFingerprints: Map<string, number>;
   seenToolResultIds: Set<string>;
   toolResultHashes: Set<string>;
+  /** Google function calls have no stable tool_use id. Position+payload hashes
+   * distinguish historical replays from newly appended occurrences. */
+  seenGoogleCallOccurrences: Set<string>;
+  seenGoogleResultOccurrences: Set<string>;
   hadCompression: boolean;
   repeatedReadsAfterCompression: number;
   breakerActive: boolean;
@@ -139,6 +143,8 @@ function getSession(key: string): SessionState {
     readFingerprints: new Map(),
     seenToolResultIds: new Set(),
     toolResultHashes: new Set(),
+    seenGoogleCallOccurrences: new Set(),
+    seenGoogleResultOccurrences: new Set(),
     hadCompression: false,
     repeatedReadsAfterCompression: 0,
     breakerActive: false,
@@ -226,6 +232,141 @@ export async function observeAnthropicTrajectory(
         if (state.toolResultHashes.has(resultHash)) repeatedToolResults += 1;
         state.toolResultHashes.add(resultHash);
         trimSet(state.toolResultHashes, MAX_FINGERPRINTS_PER_SESSION);
+      }
+    }
+  }
+
+  if (
+    !state.breakerActive
+    && state.hadCompression
+    && state.repeatedReadsAfterCompression >= REPEAT_BREAKER_THRESHOLD
+  ) {
+    state.breakerActive = true;
+    breakerTriggered = true;
+  }
+  touchSession(sessionSha8, state);
+  return {
+    sessionSha8,
+    newToolCalls,
+    newReadLikeCalls,
+    repeatedReadLikeCalls,
+    repeatedToolResults,
+    compressionExposed: state.hadCompression,
+    breakerTriggered,
+    breakerActive: state.breakerActive,
+  };
+}
+
+interface GooglePartLike {
+  text?: unknown;
+  functionCall?: { name?: unknown; args?: unknown };
+  functionResponse?: { name?: unknown; response?: unknown };
+}
+
+interface GoogleContentLike {
+  role?: unknown;
+  parts?: unknown;
+}
+
+function objectRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function googleFirstUserMaterial(contents: readonly GoogleContentLike[]): string {
+  const first = contents.find((content) => content?.role === 'user');
+  if (!first || !Array.isArray(first.parts)) return '';
+  return first.parts
+    .map((raw) => objectRecord(raw))
+    .filter((part): part is Record<string, unknown> => part !== null)
+    .map((part) => typeof part.text === 'string' ? part.text : '')
+    .filter(Boolean)
+    .join('\n');
+}
+
+/**
+ * Observe native Google GenerateContent or AGY/Antigravity nested requests.
+ * Google functionCall/functionResponse parts do not carry Anthropic-style stable
+ * tool ids, so PXPipe keys each historical occurrence by content/part position
+ * plus a payload hash. Replayed history is ignored, while the same Read/Grep
+ * input appended at a later position counts as a real repeat.
+ */
+export async function observeGoogleTrajectory(
+  body: Uint8Array,
+  explicitModel?: string | null,
+  antigravityEnvelope = false,
+): Promise<TrajectoryObservation | undefined> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder().decode(body));
+  } catch {
+    return undefined;
+  }
+  const outer = objectRecord(parsed);
+  if (!outer) return undefined;
+  const request = antigravityEnvelope ? objectRecord(outer.request) : outer;
+  if (!request || !Array.isArray(request.contents)) return undefined;
+  const contents = request.contents.filter(
+    (value): value is GoogleContentLike => Boolean(value && typeof value === 'object'),
+  );
+  const model = typeof explicitModel === 'string' && explicitModel
+    ? explicitModel
+    : typeof outer.model === 'string'
+      ? outer.model
+      : '';
+  const sessionSha8 = await sha256Prefix(`${model}\n${googleFirstUserMaterial(contents)}`, 8);
+  const state = getSession(sessionSha8);
+  let newToolCalls = 0;
+  let newReadLikeCalls = 0;
+  let repeatedReadLikeCalls = 0;
+  let repeatedToolResults = 0;
+  let breakerTriggered = false;
+
+  for (let ci = 0; ci < contents.length; ci++) {
+    const content = contents[ci]!;
+    if (!Array.isArray(content.parts)) continue;
+    for (let pi = 0; pi < content.parts.length; pi++) {
+      const part = objectRecord(content.parts[pi]) as GooglePartLike | null;
+      if (!part) continue;
+      const call = objectRecord(part.functionCall) as { name?: unknown; args?: unknown } | null;
+      if (call && typeof call.name === 'string') {
+        const payload = `${call.name.toLowerCase()}\n${canonicalJson(call.args)}`;
+        const occurrence = await sha256Prefix(`call\n${ci}:${pi}\n${payload}`);
+        if (!state.seenGoogleCallOccurrences.has(occurrence)) {
+          state.seenGoogleCallOccurrences.add(occurrence);
+          trimSet(state.seenGoogleCallOccurrences, MAX_TOOL_IDS_PER_SESSION);
+          newToolCalls += 1;
+          if (isReadLikeTool(call.name)) {
+            newReadLikeCalls += 1;
+            const fingerprint = await sha256Prefix(payload);
+            const prior = state.readFingerprints.get(fingerprint) ?? 0;
+            state.readFingerprints.delete(fingerprint);
+            state.readFingerprints.set(fingerprint, prior + 1);
+            trimMap(state.readFingerprints, MAX_FINGERPRINTS_PER_SESSION);
+            if (prior > 0) {
+              repeatedReadLikeCalls += 1;
+              if (state.hadCompression) state.repeatedReadsAfterCompression += 1;
+            }
+          }
+        }
+      }
+
+      const response = objectRecord(part.functionResponse) as {
+        name?: unknown;
+        response?: unknown;
+      } | null;
+      if (response) {
+        const payload = canonicalJson(response.response);
+        const occurrence = await sha256Prefix(`result\n${ci}:${pi}\n${String(response.name ?? '')}\n${payload}`);
+        if (!state.seenGoogleResultOccurrences.has(occurrence)) {
+          state.seenGoogleResultOccurrences.add(occurrence);
+          trimSet(state.seenGoogleResultOccurrences, MAX_TOOL_IDS_PER_SESSION);
+          const resultHash = await sha256Prefix(payload);
+          if (state.toolResultHashes.has(resultHash)) repeatedToolResults += 1;
+          state.toolResultHashes.add(resultHash);
+          trimSet(state.toolResultHashes, MAX_FINGERPRINTS_PER_SESSION);
+        }
       }
     }
   }

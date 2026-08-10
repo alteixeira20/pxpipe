@@ -47,7 +47,7 @@ Dashboard:
 http://127.0.0.1:47821/
 ```
 
-The dashboard exposes recent requests, measured token accounting, rendered pages, model scope, and a live compression kill switch.
+The dashboard exposes recent requests, measured token accounting, rendered pages, model scope, a live compression kill switch, and the exact gate reason for text-only requests. AGY/Antigravity traffic uses the same persistent loopback listener and appears in this telemetry when the daemon is healthy.
 
 ## Reliability profiles
 
@@ -68,7 +68,9 @@ Current behavior:
 - only the currently validated safe model family is transformed;
 - a pxpipe transform implementation error fails open to a native-text retry before any model request is duplicated.
 
-At this milestone the safe model scope is intentionally **`claude-fable-5` only**. Other render profiles still exist, but technical image support is not enough to qualify as a safe coding default.
+The validated safe model scope currently includes **`claude-fable-5`** and **Gemini 3.6 Flash** (including AGY/Antigravity `-high`, `-medium`, and `-low` effort aliases). Other render profiles still exist, but technical image support alone is not enough to qualify as a safe coding default.
+
+For Gemini/AGY, a fresh one-turn request can legitimately produce **no image**: coding-safe keeps system/tool authority native and waits for a sufficiently old, closed conversation prefix. The default Google policy keeps the most recent eight contents byte-exact and can collapse an older closed prefix once at least four units and roughly 2k text tokens are eligible and the image gate is profitable. The dashboard's request **Details** view explains this decision even when no PNG was emitted.
 
 ### `balanced`
 

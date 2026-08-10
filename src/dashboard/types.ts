@@ -81,6 +81,12 @@ export interface RecentRow {
   session_saved_so_far_delta?: number;
   img_id?: number;
   img_ids?: number[];
+  detail_id?: number;
+  decision_reason?: string;
+  history_reason?: string;
+  image_count?: number;
+  trajectory_repeated_read_like_calls?: number;
+  trajectory_breaker_active?: boolean;
   transformation_state?: string;
 }
 

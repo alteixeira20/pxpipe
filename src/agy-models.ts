@@ -81,9 +81,20 @@ function addModel(unique: Set<string>, candidate: string): void {
   unique.add(normalized);
 }
 
+function plausibleSingleModelId(candidate: string): boolean {
+  if (!MODEL_ID.test(candidate)) return false;
+  // Preserve known family aliases even when they use a `latest` suffix, and
+  // preserve unknown ids that contain normal model-version/namespace signals.
+  // A bare heading such as `GPT-OSS` has none of these and must not become a
+  // selectable phantom model merely because it is a syntactically valid token.
+  return /\d/.test(candidate)
+    || /[/:.]/.test(candidate)
+    || /(?:^|[-_])latest(?:$|[-_])/i.test(candidate);
+}
+
 /**
  * Parse both the historical one-id-per-line format and newer human-formatted
- * tables/bullets. Exact single-token lines retain unknown models; formatted
+ * tables/bullets. Plausible single-token model ids are retained; formatted
  * lines only contribute recognized family-shaped ids so headings/warnings do
  * not become fake model identifiers.
  */
@@ -93,11 +104,11 @@ export function parseAgyModelsOutput(output: string): string[] {
     const line = cleanLine(raw);
     if (!line) continue;
 
-    if (MODEL_ID.test(line)) {
+    if (plausibleSingleModelId(line)) {
       addModel(unique, line);
     } else {
       for (const match of line.matchAll(KNOWN_MODEL_TOKEN)) {
-        addModel(unique, match[0]);
+        if (plausibleSingleModelId(match[0])) addModel(unique, match[0]);
         if (unique.size >= MAX_MODELS) break;
       }
     }
@@ -117,7 +128,7 @@ export function parseAgyModelsStreams(stdout: string, stderr: string): string[] 
   for (const raw of stderr.split(/\r?\n/)) {
     const line = cleanLine(raw);
     for (const match of line.matchAll(KNOWN_MODEL_TOKEN)) {
-      addModel(unique, match[0]);
+      if (plausibleSingleModelId(match[0])) addModel(unique, match[0]);
       if (unique.size >= MAX_MODELS) break;
     }
     if (unique.size >= MAX_MODELS) break;

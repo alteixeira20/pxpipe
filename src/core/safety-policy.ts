@@ -72,6 +72,14 @@ const PROFILES: Record<CompressionProfileName, CompressionProfile> = {
         minCollapsePrefix: 16,
         minCollapseTokens: 4_000,
       },
+      // Google has no Anthropic-style cache marker and uses a different turn
+      // shape. Keep eight recent contents byte-exact, but allow a profitable
+      // closed four-unit archival prefix to collapse once it exceeds 2k tokens.
+      googleHistory: {
+        keepTail: 8,
+        minCollapseUnits: 4,
+        minCollapseTokens: 2_000,
+      },
       keepSharp: shouldKeepToolResultSharp,
     },
   },
@@ -93,6 +101,11 @@ const PROFILES: Record<CompressionProfileName, CompressionProfile> = {
         minCollapsePrefix: 12,
         minCollapseTokens: 3_000,
       },
+      googleHistory: {
+        keepTail: 6,
+        minCollapseUnits: 2,
+        minCollapseTokens: 1_500,
+      },
       keepSharp: shouldKeepToolResultSharp,
     },
   },
@@ -109,6 +122,11 @@ const PROFILES: Record<CompressionProfileName, CompressionProfile> = {
       charsPerToken: 4,
       historyAmortizationHorizon: 1,
       collapseHistory: true,
+      googleHistory: {
+        keepTail: 4,
+        minCollapseUnits: 1,
+        minCollapseTokens: 1_000,
+      },
       reflow: true,
       keepSharp: () => false,
       emitRecoverable: false,
