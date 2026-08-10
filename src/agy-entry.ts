@@ -17,7 +17,8 @@ import {
   type AgyFailureKind,
 } from './agy.js';
 import { discoverAgyModels } from './agy-models.js';
-import { isGeminiModel } from './core/gemini-model-profiles.js';
+import { resolveGoogleTransportProfile } from './core/google-transport-profiles.js';
+import { isPxpipeSupportedModel } from './core/applicability.js';
 import {
   clearAgyCooldown,
   extractAgyModel,
@@ -215,7 +216,12 @@ async function runDoctor(args: readonly string[]): Promise<void> {
       count: routes.length > 0 ? routes.length : persistentProxy ? 1 : 0,
       compressionReady: routes.length > 0
         ? server.reachable
-        : Boolean(persistentProxy && options.model && isGeminiModel(options.model)),
+        : Boolean(
+            persistentProxy &&
+              options.model &&
+              resolveGoogleTransportProfile(options.model) !== null &&
+              isPxpipeSupportedModel(options.model),
+          ),
       mode: routeMode,
       ...(persistentProxy ? { proxyUrl: persistentProxy.proxyUrl } : {}),
     },

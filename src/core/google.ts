@@ -13,7 +13,8 @@ import {
   shrinkColsToContent,
   type RenderedImage,
 } from './render.js';
-import { geminiVisionTokens, isGeminiModel, resolveGeminiProfile } from './gemini-model-profiles.js';
+import { googleTransportVisionTokens, resolveGoogleTransportProfile } from './google-transport-profiles.js';
+import { resolveGeminiProfile } from './gemini-model-profiles.js';
 import { bytesToBase64 } from './png.js';
 import {
   classifyContent,
@@ -281,7 +282,7 @@ async function compressGoogleToolResults(
   });
   if (options.compressToolResults === false) return empty();
 
-  const profile = resolveGeminiProfile();
+  const profile = resolveGoogleTransportProfile(modelName) ?? resolveGeminiProfile();
   const minChars = Math.max(0, options.minToolResultChars ?? 6000);
   const perResultCap = Math.max(1, options.maxImagesPerToolResult ?? 10);
   const allImages: RenderedImage[] = [];
@@ -338,7 +339,7 @@ async function compressGoogleToolResults(
         continue;
       }
       const imageTokens = images.reduce(
-        (sum, image) => sum + geminiVisionTokens(modelName, image.width, image.height),
+        (sum, image) => sum + googleTransportVisionTokens(modelName, image.width, image.height),
         0,
       );
 
@@ -457,7 +458,7 @@ async function planGoogleHistory(
   tuning: NonNullable<TransformOptions['googleHistory']> = {},
   maxImageToTextRatio = 1,
 ): Promise<GoogleHistoryPlan | null> {
-  const profile = resolveGeminiProfile();
+  const profile = resolveGoogleTransportProfile(modelName) ?? resolveGeminiProfile();
   const keepTail = Math.max(0, Math.floor(tuning.keepTail ?? profile.history.keepTail));
   const minCollapseUnits = Math.max(1, Math.floor(tuning.minCollapseUnits ?? 10));
   const minCollapseTokens = Math.max(1, Math.floor(
@@ -495,7 +496,7 @@ async function planGoogleHistory(
   );
   if (images.length === 0 || images.length > profile.history.maxImages) return null;
   const imageTokens = images.reduce(
-    (sum, image) => sum + geminiVisionTokens(modelName, image.width, image.height),
+    (sum, image) => sum + googleTransportVisionTokens(modelName, image.width, image.height),
     0,
   );
   const introOutroTokens = googleTextTokens(
@@ -569,7 +570,8 @@ export async function transformGoogleGenerateContent(
   modelName: string,
   options: TransformOptions = {},
 ): Promise<{ body: Uint8Array; info: TransformInfo }> {
-  if (!isGeminiModel(modelName)) {
+  const profile = resolveGoogleTransportProfile(modelName);
+  if (!profile) {
     const info = createDefaultInfo(modelName);
     info.reason = 'unsupported_model';
     return { body: bodyBytes, info };
@@ -619,7 +621,7 @@ export async function transformGoogleGenerateContent(
   const combinedRaw = [authorityText, toolRewrite.docs].filter(Boolean).join('\n\n');
   info.origChars = combinedRaw.length;
 
-  const profile = resolveGeminiProfile();
+
   let staticImages: RenderedImage[] = [];
   let staticProfitable = false;
   let textTokens = 0;
@@ -656,7 +658,7 @@ export async function transformGoogleGenerateContent(
       }
     }
     imageTokens = staticImages.reduce(
-      (total, image) => total + geminiVisionTokens(modelName, image.width, image.height),
+      (total, image) => total + googleTransportVisionTokens(modelName, image.width, image.height),
       0,
     );
     textTokens = Math.max(
@@ -868,7 +870,7 @@ export async function transformGoogleGenerateContent(
         recordFactSheetTelemetry(info, historyPlan.telemetry);
       }
       const historyImageTokens = historyPlan.images.reduce(
-        (sum, image) => sum + geminiVisionTokens(modelName, image.width, image.height),
+        (sum, image) => sum + googleTransportVisionTokens(modelName, image.width, image.height),
         0,
       );
       info.imageTokens += historyImageTokens;
@@ -908,7 +910,7 @@ export async function transformGoogleGenerateContent(
       recordFactSheetTelemetry(info, toolResultPlan.telemetry);
     }
     const resultImageTokens = toolResultPlan.images.reduce(
-      (sum, image) => sum + geminiVisionTokens(modelName, image.width, image.height),
+      (sum, image) => sum + googleTransportVisionTokens(modelName, image.width, image.height),
       0,
     );
     info.imageTokens += resultImageTokens;

@@ -35,7 +35,7 @@ import {
   isAntigravityInferencePath,
   transformAntigravityGenerateContent,
 } from './antigravity.js';
-import { isGeminiModel } from './gemini-model-profiles.js';
+import { resolveGoogleTransportProfile } from './google-transport-profiles.js';
 import { resolveGptProfile } from './gpt-model-profiles.js';
 import {
   buildFeatherlessUpstreamUrl,
@@ -1545,7 +1545,7 @@ export function createProxy(config: ProxyConfig = {}) {
           : false;
 
         const modelOk = isGoogle
-          ? isGeminiModel(model) && isPxpipeSupportedModel(model)
+          ? resolveGoogleTransportProfile(model) !== null && isPxpipeSupportedModel(model)
           : isMessages
             ? (messagesAnthropic && isPxpipeSupportedModel(model))
               || bridgedGptMessages
