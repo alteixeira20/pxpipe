@@ -27,11 +27,22 @@
  *  (`PXPIPE_CODEX_UPSTREAM=https://api.openai.com/v1`). */
 export const DEFAULT_CODEX_UPSTREAM = 'https://chatgpt.com/backend-api/codex';
 
-/** PXPipe's provider-router id: `/providers/codex/...`. */
+/** PXPipe's provider-router id: `/providers/<id>/...`. */
 export const CODEX_PROVIDER_ID = 'codex';
 
 /** The id Codex knows this provider by, inside its own config namespace. */
 export const CODEX_MODEL_PROVIDER_ID = 'pxpipe';
+
+/**
+ * Codex's provider *name* is behavioral, not merely cosmetic: current Codex
+ * identifies the native OpenAI provider by the exact friendly name `OpenAI`
+ * when deciding whether `/responses/compact` remote compaction is available.
+ * Keep that native identity while using our distinct config id (`pxpipe`) and
+ * loopback base URL. Calling the provider "PXPipe" silently switched long
+ * sessions to Codex's local compaction path and made PXPipe-vs-native A/B work
+ * incomparable for exactly the long contexts we are trying to measure.
+ */
+export const CODEX_NATIVE_PROVIDER_NAME = 'OpenAI';
 
 /** Internal header understood only by PXPipe's loopback reliability wrapper.
  * The wrapper strips it before forwarding to ChatGPT. */
@@ -42,9 +53,10 @@ export const CODEX_PASSTHROUGH_HEADER_VALUE = 'codex-passthrough';
 
 export const DEFAULT_CODEX_PORT = 47821;
 
-/** Codex appends `/responses` and `/models` to this base. Deliberately without
- *  a `/v1` segment: PXPipe strips the `/providers/codex` prefix and forwards
- *  the remainder onto the upstream base, which already carries its own path. */
+/** Codex appends `/responses`, `/responses/compact` and `/models` to this base.
+ * Deliberately without a `/v1` segment: PXPipe strips the `/providers/codex`
+ * prefix and forwards the remainder onto the upstream base, which already
+ * carries its own path. */
 export function codexProviderBaseUrl(port: number): string {
   return `http://127.0.0.1:${port}/providers/${CODEX_PROVIDER_ID}`;
 }
@@ -62,6 +74,10 @@ export interface CodexConfigOptions {
  * headers on the request, so the upstream still sees the user's own session and
  * PXPipe never reads, stores or rewrites the credential.
  *
+ * The friendly provider name intentionally remains `OpenAI`: Codex uses that
+ * exact name as the capability signal for its native remote-compaction path.
+ * The provider id is still `pxpipe`, so the built-in provider is not overridden.
+ *
  * Codex's custom provider schema also supports static `http_headers`. PXPipe uses
  * that only for the explicit passthrough experiment arm; the local wrapper removes
  * the header before the request is re-originated to ChatGPT.
@@ -72,7 +88,7 @@ export function buildCodexConfigArgs(
 ): string[] {
   const provider = `model_providers.${CODEX_MODEL_PROVIDER_ID}`;
   const args = [
-    '-c', `${provider}.name=PXPipe`,
+    '-c', `${provider}.name=${CODEX_NATIVE_PROVIDER_NAME}`,
     '-c', `${provider}.base_url=${baseUrl}`,
     '-c', `${provider}.wire_api=responses`,
     '-c', `${provider}.requires_openai_auth=true`,
