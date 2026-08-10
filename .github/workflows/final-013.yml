@@ -5,6 +5,7 @@ on:
     branches: [release/0.13-reliability]
     paths:
       - .github/final-013.py
+      - .github/final-fix.py
       - .github/workflows/final-013.yml
   pull_request:
     branches: [main]
@@ -37,7 +38,8 @@ jobs:
       - name: Materialize final session isolation
         run: |
           python3 .github/final-013.py
-          git rm .github/final-013.py .github/workflows/final-013.yml
+          python3 .github/final-fix.py
+          git rm .github/final-013.py .github/final-fix.py .github/workflows/final-013.yml
           git diff --check
       - run: pnpm install --frozen-lockfile
       - run: pnpm run audit
