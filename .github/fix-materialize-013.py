@@ -14,6 +14,16 @@ replace(
     """  return /^(?:claude-|gemini-|gpt[-_]|o\\d)/i.test(candidate)\n    || /[0-9/:.]/.test(candidate);\n""",
     """  return /\\d/.test(candidate)\n    || /[/:.]/.test(candidate)\n    || /(?:^|[-_])latest(?:$|[-_])/i.test(candidate);\n""",
 )
+replace(
+    'src/agy-models.ts',
+    """      for (const match of line.matchAll(KNOWN_MODEL_TOKEN)) {\n        addModel(unique, match[0]);\n        if (unique.size >= MAX_MODELS) break;\n      }\n""",
+    """      for (const match of line.matchAll(KNOWN_MODEL_TOKEN)) {\n        if (plausibleSingleModelId(match[0])) addModel(unique, match[0]);\n        if (unique.size >= MAX_MODELS) break;\n      }\n""",
+)
+replace(
+    'src/agy-models.ts',
+    """    for (const match of line.matchAll(KNOWN_MODEL_TOKEN)) {\n      addModel(unique, match[0]);\n      if (unique.size >= MAX_MODELS) break;\n    }\n""",
+    """    for (const match of line.matchAll(KNOWN_MODEL_TOKEN)) {\n      if (plausibleSingleModelId(match[0])) addModel(unique, match[0]);\n      if (unique.size >= MAX_MODELS) break;\n    }\n""",
+)
 
 replace(
     'src/core/google.ts',
