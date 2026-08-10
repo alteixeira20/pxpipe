@@ -181,9 +181,22 @@ export function parseCodexInvocation(
   return { binary, direct, args: rest.slice(index) };
 }
 
-/** Full argument vector for the child: PXPipe routing first, user args verbatim. */
-export function buildCodexCommandArgs(baseUrl: string, args: readonly string[]): string[] {
-  return [...buildCodexConfigArgs(baseUrl), ...args];
+/**
+ * Full argument vector for the routed child.
+ *
+ * When PXPipe can resolve a model from the user's Codex config/profile it pins
+ * that same model through the temporary config layer. This avoids a Codex
+ * custom-provider edge case where a provider with no resolved model can launch
+ * without the normal coding tools. Explicit Codex CLI arguments are still
+ * appended afterwards and therefore retain their normal precedence.
+ */
+export function buildCodexCommandArgs(
+  baseUrl: string,
+  args: readonly string[],
+  resolvedModel?: string,
+): string[] {
+  const modelArgs = resolvedModel?.trim() ? ['-c', `model=${resolvedModel.trim()}`] : [];
+  return [...buildCodexConfigArgs(baseUrl), ...modelArgs, ...args];
 }
 
 export function resolveCodexPort(env: NodeJS.ProcessEnv = process.env): number {
@@ -263,7 +276,7 @@ export async function inspectCodexRoute(
   }
 }
 
-/** The model Codex ships as its default, used to report the compression gate. */
+/** Reference model used only when no explicit/configured Codex model is known. */
 export const CODEX_REFERENCE_MODEL = 'gpt-5.6-sol';
 
 export interface CodexCompressionGate {

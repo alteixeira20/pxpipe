@@ -85,17 +85,25 @@ describe('Google transport profiles resolution and vision tokens', () => {
   });
 
   describe('P2 — Deterministic Gemini 3.6 Flash High history collapse proof', () => {
-    it('compresses eligible history for gemini-3.6-flash-high yielding collapsed history and rendered images', async () => {
+    it('compresses profitable eligible history for gemini-3.6-flash-high', async () => {
       const contents: Array<Record<string, unknown>> = [];
-      // Build 15 closed turn rounds of history
+      // The history gate is deliberately economic, not merely a unit-count gate.
+      // Give the fixture enough archival prose that the Gemini image + native
+      // framing cost is provably below the plain-text baseline on every CI node.
       for (let i = 0; i < 15; i++) {
         contents.push({
           role: 'user',
-          parts: [{ text: `User request turn ${i}: inspect src/core/google.ts line ${100 + i}` }],
+          parts: [{
+            text: `User request turn ${i}: inspect src/core/google.ts line ${100 + i}. `
+              + `Archived request context ${i}. `.repeat(50),
+          }],
         });
         contents.push({
           role: 'model',
-          parts: [{ text: `Model response turn ${i}: inspect completed.` }],
+          parts: [{
+            text: `Model response turn ${i}: inspection completed. `
+              + `Archived analysis and findings ${i}. `.repeat(70),
+          }],
         });
       }
       contents.push({
@@ -113,11 +121,15 @@ describe('Google transport profiles resolution and vision tokens', () => {
       const inputBytes = new TextEncoder().encode(JSON.stringify(body));
       const res = await transformGoogleGenerateContent(inputBytes, 'gemini-3.6-flash-high', {
         googleHistory: { keepTail: 2, minCollapseUnits: 4, minCollapseTokens: 100 },
+        googleMaxImageToTextRatio: 0.8,
+        requireLosslessRender: true,
       });
 
       expect(res.info.compressed).toBe(true);
       expect(res.info.historyReason).toBe('collapsed');
       expect(res.info.imageCount).toBeGreaterThan(0);
+      expect(res.info.droppedChars ?? 0).toBe(0);
+      expect(res.info.baselineImagedTokens ?? 0).toBeGreaterThan(res.info.imageTokens ?? 0);
     });
   });
 
