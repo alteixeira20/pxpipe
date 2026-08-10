@@ -189,7 +189,7 @@ describe('Codex installed-route contract', () => {
     expect(findCurrentTask(transformed.input)).toBe(true);
     expect(JSON.stringify(transformed.input)).toContain('"type":"input_image"');
 
-    expect(event?.provider).toBe('openai');
+    expect(event?.provider).toBe('codex');
     expect(event?.accountingProvider).toBe('openai');
     expect(event?.path).toBe('/responses');
     expect(event?.model).toBe('gpt-5.6-sol');
