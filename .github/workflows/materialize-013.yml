@@ -5,6 +5,7 @@ on:
     branches: [release/0.13-reliability]
     paths:
       - .github/materialize-013.py
+      - .github/fix-materialize-013.py
       - .github/workflows/materialize-013.yml
   pull_request:
     branches: [main]
@@ -37,7 +38,8 @@ jobs:
       - name: Materialize release changes
         run: |
           python3 .github/materialize-013.py
-          git rm .github/materialize-013.py .github/workflows/materialize-013.yml
+          python3 .github/fix-materialize-013.py
+          git rm .github/materialize-013.py .github/fix-materialize-013.py .github/workflows/materialize-013.yml
           git diff --check
       - run: pnpm install --frozen-lockfile
       - run: pnpm run audit
