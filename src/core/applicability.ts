@@ -36,7 +36,47 @@ let runtimeSafetyScope: PxpipeSafetyScope | null = null;
  * filter on top of this list. Keeping this baseline unchanged prevents a semantic
  * policy change from breaking direct createProxy/dashboard/test consumers. */
 const DEFAULT_MODEL_BASES = ['claude-fable-5', 'gemini-3.6-flash'];
-const SAFE_VALIDATED_MODEL_BASES = ['claude-fable-5', 'gemini-3.6-flash'];
+/**
+ * Model bases whose provider transform has been proven against the coding-safe
+ * invariants. Admission is per validated CONTRACT, never per model name, and it
+ * does not turn a model on: `PXPIPE_MODELS` still has to name it (see
+ * DEFAULT_MODEL_BASES above). This list only says "if you ask for it, the safe
+ * profiles will not refuse it".
+ *
+ * Each entry is matched by `modelBaseMatches`, i.e. the exact id plus
+ * `<id>-`-suffixed aliases — deliberately narrow, so a sibling variant sharing a
+ * version number (gpt-5.6-terra, claude-opus-5.1) is NOT admitted by proxy.
+ *
+ *  - The Claude 5 family: `resolveClaudeProfile` returns the SAME
+ *    CLAUDE_PROFILE OBJECT for every one of them (patch28 vision, high-res
+ *    tier, 312-col geometry, mixed Responses planner), so each inherits Fable
+ *    5's validated contract identically rather than a look-alike one. Object
+ *    identity is the admission criterion, and the test asserts it.
+ *  - gpt-5.6-sol: OpenAI Chat/Responses under GPT56_SOL_PROFILE. The base
+ *    matched here is exactly the id set GPT56_SOL_PROFILE's own rule claims, so
+ *    nothing admitted can fall through to DEFAULT_GPT_PROFILE's tile math.
+ *
+ * Deliberately still OUT, because each resolves to a DIFFERENT profile and so
+ * is a different contract, not a different name for this one:
+ *  - Pre-4.7 Claude (claude-*-4-6): CLAUDE_LEGACY_PROFILE, whose `standard`
+ *    vision tier means the server downscales to 1568 px before reading. The
+ *    312-column strip's legibility was measured at the high-res tier; at half
+ *    the width it is an open question, not an inherited result.
+ *  - gpt-5.6-terra / gpt-5.6-luna / bare gpt-5.6: the generic 5.x flagship
+ *    profile — 152 columns instead of 84, a different font, a capped patch
+ *    bill, and the `pairs` Responses planner instead of `mixed`. Sharing a
+ *    version number with Sol is not sharing Sol's render contract.
+ *
+ * See tests/coding-safe-model-scope.test.ts for the per-invariant proofs.
+ */
+const SAFE_VALIDATED_MODEL_BASES = [
+  'claude-fable-5',
+  'claude-opus-5',
+  'claude-sonnet-5',
+  'claude-haiku-5',
+  'gemini-3.6-flash',
+  'gpt-5.6-sol',
+];
 
 function falsey(v: string): boolean {
   return /^(0|false|no|off|none)$/i.test(v.trim());

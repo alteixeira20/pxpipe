@@ -25,14 +25,15 @@ describe('semantic safety scope gates model families', () => {
     setAllowedModelBases([
       'claude-fable-5',
       'gemini-3.6-flash',
-      'gpt-5.6-sol',
+      // Sibling of a validated id, deliberately NOT itself validated.
+      'gpt-5.6-terra',
       'moonshotai/kimi-k3',
     ]);
 
     expect(getAllowedModelBases()).toEqual(['claude-fable-5', 'gemini-3.6-flash']);
     expect(isPxpipeSupportedModel('claude-fable-5')).toBe(true);
     expect(isPxpipeSupportedModel('gemini-3.6-flash')).toBe(true);
-    expect(isPxpipeSupportedGptModel('gpt-5.6-sol')).toBe(false);
+    expect(isPxpipeSupportedGptModel('gpt-5.6-terra')).toBe(false);
   });
 
   it('balanced preserves the same validated model boundary', () => {
@@ -43,10 +44,10 @@ describe('semantic safety scope gates model families', () => {
 
   it('aggressive allows explicit experimental model opt-ins', () => {
     setCompressionSafetyScope('aggressive');
-    setAllowedModelBases(['gemini-3.6-flash', 'gpt-5.6-sol']);
-    expect(getAllowedModelBases()).toEqual(['gemini-3.6-flash', 'gpt-5.6-sol']);
+    setAllowedModelBases(['gemini-3.6-flash', 'gpt-5.6-terra']);
+    expect(getAllowedModelBases()).toEqual(['gemini-3.6-flash', 'gpt-5.6-terra']);
     expect(isPxpipeSupportedModel('gemini-3.6-flash')).toBe(true);
-    expect(isPxpipeSupportedGptModel('gpt-5.6-sol')).toBe(true);
+    expect(isPxpipeSupportedGptModel('gpt-5.6-terra')).toBe(true);
   });
 
   it('passthrough blocks all transformation regardless of the model list', () => {

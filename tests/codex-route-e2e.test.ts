@@ -195,9 +195,10 @@ describe('codex compression gate under the shipped safety scopes', () => {
   /**
    * Documents the policy a Codex user actually meets. `coding-safe` restricts
    * compression to model families that have passed the coding non-inferiority
-   * suite (currently Fable 5 and Gemini 3.6 Flash), so GPT traffic traverses
-   * PXPipe and is measured but is deliberately left untransformed until GPT is
-   * validated. Anything else would silently change coding quality.
+   * suite. `gpt-5.6-sol` is now one of them (see
+   * tests/coding-safe-model-scope.test.ts), so Codex's own default model is
+   * transformed rather than merely measured — while every sibling variant that
+   * has NOT been validated is still forwarded untouched.
    */
   const runUnderProfile = async (
     profile: string,
@@ -235,13 +236,36 @@ describe('codex compression gate under the shipped safety scopes', () => {
     expect(imaged).toBe(true);
   });
 
-  it('declines GPT under the default coding-safe scope, with an explicit reason', async () => {
-    // Not a Codex defect: coding-safe admits only model families that have
-    // passed the coding non-inferiority suite. Codex traffic still traverses
-    // PXPipe and is measured; it is simply forwarded untransformed.
-    const { event, upstream } = await runUnderProfile('coding-safe');
-    expect(event?.info?.compressed).toBe(false);
-    expect(event?.info?.reason).toBe('unsupported_model');
-    expect(await upstream[0]!.text()).toBe(codexTurn());
+  it('admits Codex\'s own gpt-5.6-sol under the default coding-safe scope', async () => {
+    const { event } = await runUnderProfile('coding-safe');
+    expect(event?.model).toBe('gpt-5.6-sol');
+    expect(event?.info?.reason).not.toBe('unsupported_model');
+  });
+
+  it('still declines an unvalidated sibling variant under coding-safe', async () => {
+    // The scope is per validated contract, not per version number: gpt-5.6-terra
+    // shares a release with Sol and is still forwarded untransformed.
+    const previous = process.env.PXPIPE_PROFILE;
+    process.env.PXPIPE_PROFILE = 'coding-safe';
+    const body = codexTurn().replace(/gpt-5\.6-sol/g, 'gpt-5.6-terra');
+    try {
+      const upstream: Request[] = [];
+      mockUpstream((request) => {
+        upstream.push(request.clone());
+        return responsesReply();
+      });
+      let event: ProxyEvent | undefined;
+      const router = codexRouter((e) => { event = e; });
+      await (await router(codexRequest(body))).text();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(event?.info?.compressed).toBe(false);
+      expect(event?.info?.reason).toBe('unsupported_model');
+      expect(await upstream[0]!.text()).toBe(body);
+    } finally {
+      restoreFetch?.();
+      restoreFetch = undefined;
+      if (previous === undefined) delete process.env.PXPIPE_PROFILE;
+      else process.env.PXPIPE_PROFILE = previous;
+    }
   });
 });

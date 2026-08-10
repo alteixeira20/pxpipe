@@ -16,7 +16,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { isIP } from 'node:net';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { parseGatewayHeaders, resolveUpstreams, type ProxyConfig } from './core/proxy.js';
 import { createFailOpenProxy } from './core/fail-open.js';
 import { createProviderRouter } from './core/provider-router.js';
@@ -43,6 +43,11 @@ import {
 } from './dashboard.js';
 import { setPxpipeVersion } from './core/featherless.js';
 import { CODEX_PROVIDER_ID, DEFAULT_CODEX_UPSTREAM } from './core/codex.js';
+import {
+  parseClaudeInvocation,
+  persistentListenerReachable,
+  resolveClaudePort,
+} from './core/claude-cli.js';
 import { resolveCompressionProfile } from './core/safety-policy.js';
 
 /** Runtime config. The core transform tuning comes from DEFAULTS in
@@ -232,6 +237,13 @@ function printHelp(): void {
 Usage:
   pxpipe                run the proxy (no flags)
   pxpipe export [...]   render files/diff to PNG pages + cost report (see pxpipe export --help)
+  pxpipe claude [--binary NAME] [--direct] [claude args...]
+                        run Claude Code through the persistent proxy. Reuses
+                        the listener already on PORT — it never binds one — by
+                        warping api.anthropic.com/v1/messages into it. Claude
+                        auth and CLAUDE_CONFIG_DIR are untouched:
+                          pxpipe claude
+                          pxpipe claude --binary claude-next -- --resume
   pxpipe codex [--binary NAME] [--direct] [codex args...]
                         run Codex CLI through the persistent proxy. Reuses the
                         listener already on PORT — it never binds one — and
@@ -1106,11 +1118,80 @@ async function runExport(argv: string[]): Promise<void> {
 
 // ---- main ----------------------------------------------------------------
 
+/**
+ * `pxpipe claude` — run Claude Code through the persistent listener.
+ *
+ * Deliberately the whole implementation: routing is `pxpipe warp`, which binds
+ * a kernel-assigned port for the child's CONNECT proxy and diverts only
+ * `api.anthropic.com/v1/messages` into the listener that is already running. No
+ * second persistent listener is created, no fixed port is bound, and the CA is
+ * exported to the child's environment only.
+ *
+ * A listener that is down is not a launch failure — Claude Code still starts,
+ * loudly, without routing, because a developer must not lose their agent
+ * because a token optimiser is not running.
+ */
+async function runClaudeLaunch(argv: readonly string[]): Promise<void> {
+  let invocation;
+  try {
+    invocation = parseClaudeInvocation(argv);
+  } catch (error) {
+    console.error(`[pxpipe] claude: ${(error as Error).message}`);
+    process.exit(2);
+  }
+
+  const command = [invocation.binary, ...invocation.args];
+  if (invocation.direct) {
+    console.error('[pxpipe] claude: --direct requested — running Claude Code without PXPipe routing');
+    spawnUnrouted(command);
+    return;
+  }
+
+  const port = resolveClaudePort();
+  if (!(await persistentListenerReachable(port))) {
+    console.error(
+      `[pxpipe] claude: persistent PXPipe listener unavailable on port ${port} — `
+      + 'running Claude Code direct (no compression). Start it with `pxpipe` and retry.',
+    );
+    spawnUnrouted(command);
+    return;
+  }
+
+  console.error(`[pxpipe] claude → 127.0.0.1:${port} (warp CONNECT, persistent listener reused)`);
+  createWarpRuntime({ port }).launch(command);
+}
+
+/** Run the agent with no routing at all, staying transparent to the caller. */
+function spawnUnrouted(command: string[]): void {
+  const child = spawn(command[0]!, command.slice(1), { stdio: 'inherit', env: process.env });
+  const forwarded = ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT'] as const;
+  for (const signal of forwarded) process.on(signal, () => child.kill(signal));
+  child.on('error', (error) => {
+    console.error(`[pxpipe] claude: cannot run ${command[0]}: ${error.message}`);
+    process.exit(127);
+  });
+  child.on('exit', (code, signal) => {
+    if (signal) {
+      for (const s of forwarded) process.removeAllListeners(s);
+      process.kill(process.pid, signal);
+      return;
+    }
+    process.exit(code ?? 0);
+  });
+}
+
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   if (argv[0] === 'export') {
     await runExport(argv.slice(1));
     return; // server never starts
+  }
+  // `pxpipe claude` is a named shorthand for the warp launch below. It resolves
+  // the persistent listener instead of starting one, so it exits here and never
+  // reaches the server bootstrap that would collide with pxpipe.service.
+  if (argv[0] === 'claude') {
+    await runClaudeLaunch(argv.slice(1));
+    return;
   }
   // `warp` runs an agent behind a CONNECT proxy and redirects its inference
   // traffic into the pxpipe already running. It starts no proxy of its own, so

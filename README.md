@@ -68,7 +68,7 @@ Current behavior:
 - only the currently validated safe model family is transformed;
 - a pxpipe transform implementation error fails open to a native-text retry before any model request is duplicated.
 
-The validated safe model scope currently includes **`claude-fable-5`** and **Gemini 3.6 Flash** (including AGY/Antigravity `-high`, `-medium`, and `-low` effort aliases). Other render profiles still exist, but technical image support alone is not enough to qualify as a safe coding default.
+The validated safe model scope currently includes the **Claude 5 family** (`claude-fable-5`, `claude-opus-5`, `claude-sonnet-5`, `claude-haiku-5` — every one of which resolves to the identical measured Claude render profile), **Gemini 3.6 Flash** (including AGY/Antigravity `-high`, `-medium`, and `-low` effort aliases), and **`gpt-5.6-sol`** (the Codex CLI's own model, including `gpt-5.6-sol-codex`). Other render profiles still exist, but technical image support alone is not enough to qualify as a safe coding default: admission is by resolved profile, not by name, so pre-4.7 Claude and Sol's sibling variants (`gpt-5.6-terra`, `gpt-5.6-luna`) are still passed through.
 
 For Gemini/AGY, a fresh one-turn request can legitimately produce **no image**: coding-safe keeps system/tool authority native and waits for a sufficiently old, closed conversation prefix. The default Google policy keeps the most recent eight contents byte-exact and can collapse an older closed prefix once at least four units and roughly 2k text tokens are eligible and the image gate is profitable. The dashboard's request **Details** view explains this decision even when no PNG was emitted.
 

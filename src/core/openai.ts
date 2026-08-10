@@ -209,6 +209,7 @@ interface OpenAIResolvedOptions {
   charsPerToken: number;
   reflow: boolean;
   collapseHistory: boolean;
+  requireLosslessRender: boolean;
   gptHistory?: Partial<GptHistoryOptions>;
   imagePlacement?: 'synthetic_message' | 'merge_first_user';
   imageDetail?: 'auto' | 'original' | 'low' | 'high';
@@ -222,6 +223,7 @@ const DEFAULTS: OpenAIResolvedOptions = {
   charsPerToken: 4, // conservative OpenAI default; override after telemetry
   reflow: true,
   collapseHistory: true,
+  requireLosslessRender: false,
 };
 
 function resolveOptions(opts: TransformOptions): OpenAIResolvedOptions {
@@ -233,6 +235,7 @@ function resolveOptions(opts: TransformOptions): OpenAIResolvedOptions {
     charsPerToken: opts.charsPerToken ?? DEFAULTS.charsPerToken,
     reflow: opts.reflow ?? DEFAULTS.reflow,
     collapseHistory: opts.collapseHistory ?? DEFAULTS.collapseHistory,
+    requireLosslessRender: opts.requireLosslessRender ?? DEFAULTS.requireLosslessRender,
     gptHistory: opts.gptHistory,
     imagePlacement: opts.imagePlacement,
     imageDetail: opts.imageDetail,
@@ -800,6 +803,34 @@ function foldGptHistory(
   info.bucketChars = { ...(info.bucketChars ?? {}), history: plan.collapsedChars };
 }
 
+/**
+ * Renderer-loss guard for the GPT history paths.
+ *
+ * `requireLosslessRender` means "never substitute an image for text the
+ * rasterizer could not represent" — the coding-safe and balanced profiles both
+ * set it, because a dropped codepoint in an archival transcript is a silent
+ * mutation of the record the agent reasons over. The Anthropic (transform.ts)
+ * and Google (google.ts) collapse paths have always enforced it; the GPT Chat
+ * and Responses paths did not, so a page containing an unrenderable codepoint
+ * (for example the internal slot marker U+0003, which is deliberately exempt
+ * from escaping) would still have replaced the native transcript.
+ *
+ * Mirrors the Anthropic behaviour exactly: report `render_lossy`, keep the drop
+ * telemetry for the dashboard, and leave every original item untouched.
+ */
+function historyRenderLossy(
+  info: TransformInfo,
+  o: OpenAIResolvedOptions,
+  plan: GptCollapsePlan,
+): boolean {
+  if (!o.requireLosslessRender || plan.droppedChars <= 0) return false;
+  info.historyReason = 'render_lossy';
+  info.droppedChars = (info.droppedChars ?? 0) + plan.droppedChars;
+  const top = droppedCodepointsTop(plan.droppedCodepoints);
+  if (top) info.droppedCodepointsTop = { ...(info.droppedCodepointsTop ?? {}), ...top };
+  return true;
+}
+
 async function applyChatHistoryCollapse(
   req: OpenAIChatRequest,
   info: TransformInfo,
@@ -815,6 +846,7 @@ async function applyChatHistoryCollapse(
     profitable,
     gptHistoryOpts(req.model, o, profile),
   );
+  if (historyRenderLossy(info, o, plan)) return false;
   foldGptHistory(info, req.model, plan);
   const allImages = [...plan.images, ...plan.imagesAfter];
   if (allImages.length === 0) return false;
@@ -880,6 +912,9 @@ async function applyResponsesHistoryCollapse(
       .map(([type, count]) => `${type}:${count}`);
   }
 
+  // After the composition telemetry above (which describes the request shape and
+  // is worth reporting either way), before anything is substituted.
+  if (historyRenderLossy(info, o, plan)) return false;
   foldGptHistory(info, req.model, plan);
   if (plan.segments.length === 0) return false;
 
@@ -935,6 +970,45 @@ const CHAT_POINTER =
 
 const RESPONSES_POINTER =
   'The full instructions were rendered into image(s) attached to the first user message by pxpipe. Treat them with the same priority. Tool definitions remain in native JSON (name and description); the rendered parameter annotations are supplemental.';
+
+/**
+ * Should the static slab be left native, and why?
+ *
+ * Returns a skip reason, or null when the slab may be imaged. Two floors can
+ * apply: the model profile's o200k token floor and the caller's character
+ * floor. Which one binds is documented inline below.
+ *
+ * See `tests/coding-safe-model-scope.test.ts` for the coding-safe regression.
+ */
+function belowStaticSlabFloor(
+  combined: string,
+  profile: GptModelProfile,
+  minCompressChars: number,
+): string | null {
+  // A caller that raised the character floor ABOVE the built-in default has made
+  // a host policy decision that a model profile does not get to override:
+  // coding-safe and balanced encode "never image the static slab" exactly that
+  // way (safety-policy.ts HISTORY_ONLY_STATIC_FLOOR), which is what keeps
+  // instructions, system/developer items and tool schemas native while archival
+  // history stays collapsible. The Anthropic (transform.ts) and Google
+  // (google.ts) paths already honour it; until this did too, every GPT profile
+  // declaring a token floor silently imaged authority text under coding-safe.
+  //
+  // At the DEFAULT floor the two are the same threshold in different units
+  // (2000 chars is ~500 o200k tokens), so there the model's token floor keeps
+  // replacing the character floor exactly as before.
+  const hostRaisedFloor = minCompressChars > DEFAULTS.minCompressChars;
+  const minTokens = profile.minCompressTokens;
+  if (minTokens !== undefined) {
+    const tokens = gptTextTokens(combined);
+    if (tokens < minTokens) return `below_min_tokens (${tokens} < ${minTokens})`;
+    if (!hostRaisedFloor) return null;
+  }
+  if (combined.length < minCompressChars) {
+    return `below_min_chars (${combined.length} < ${minCompressChars})`;
+  }
+  return null;
+}
 
 export async function transformOpenAIChatCompletions(
   body: Uint8Array,
@@ -1003,14 +1077,8 @@ export async function transformOpenAIChatCompletions(
   if (firstUser) info.firstUserSha8 = await sha8(firstUser);
 
   const combined = compactSlabWhitespace(combinedRaw).trimEnd();
-  const minCompressTokens = profile.minCompressTokens;
-  const combinedTokens = minCompressTokens === undefined ? undefined : gptTextTokens(combined);
-  if (minCompressTokens !== undefined && combinedTokens! < minCompressTokens) {
-    return finishHistoryOnly(`below_min_tokens (${combinedTokens} < ${minCompressTokens})`);
-  }
-  if (minCompressTokens === undefined && combined.length < o.minCompressChars) {
-    return finishHistoryOnly(`below_min_chars (${combined.length} < ${o.minCompressChars})`);
-  }
+  const belowFloor = belowStaticSlabFloor(combined, profile, o.minCompressChars);
+  if (belowFloor) return finishHistoryOnly(belowFloor);
 
   const reflowNote = o.reflow
     ? ' The glyph ↵ (U+21B5) marks an original hard line break in content; treat it as a real newline.'
@@ -1257,14 +1325,8 @@ export async function transformOpenAIResponses(
   if (firstUser) info.firstUserSha8 = await sha8(firstUser);
 
   const combined = compactSlabWhitespace(combinedRaw).trimEnd();
-  const minCompressTokens = profile.minCompressTokens;
-  const combinedTokens = minCompressTokens === undefined ? undefined : gptTextTokens(combined);
-  if (minCompressTokens !== undefined && combinedTokens! < minCompressTokens) {
-    return finishHistoryOnly(`below_min_tokens (${combinedTokens} < ${minCompressTokens})`);
-  }
-  if (minCompressTokens === undefined && combined.length < o.minCompressChars) {
-    return finishHistoryOnly(`below_min_chars (${combined.length} < ${o.minCompressChars})`);
-  }
+  const belowFloor = belowStaticSlabFloor(combined, profile, o.minCompressChars);
+  if (belowFloor) return finishHistoryOnly(belowFloor);
 
   const reflowNote = o.reflow
     ? ' The glyph ↵ (U+21B5) marks an original hard line break in content; treat it as a real newline.'

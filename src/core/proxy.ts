@@ -851,7 +851,28 @@ function teeForUsage(res: Response): {
     let buf = '';
 
     try {
-      if (ct.includes('text/event-stream')) {
+      // A declared content-type is authoritative when it says something we
+      // recognise. When it says nothing, the BYTES decide.
+      //
+      // Not hypothetical: the ChatGPT backend the Codex CLI talks to streams its
+      // Responses SSE with no `content-type` response header at all. Gating the
+      // scanner on the header alone therefore dropped that provider's own
+      // terminal `response.completed` usage block on the floor — along with
+      // stop_reason and the output measurement — and every Codex event was
+      // written with no token accounting whatsoever. Sniffing recovers the
+      // provider's authoritative numbers; nothing here estimates anything.
+      let mode: 'sse' | 'json' | 'unknown' = ct.includes('text/event-stream')
+        ? 'sse'
+        : ct.includes('application/json') ? 'json' : 'unknown';
+      if (mode === 'unknown') {
+        const first = await reader.read();
+        if (!first.done) buf += decoder.decode(first.value, { stream: true });
+        const head = buf.slice(0, 512);
+        if (/(?:^|\r?\n)(?:event|data):/.test(head)) mode = 'sse';
+        else if (/^\s*[[{]/.test(head)) mode = 'json';
+      }
+
+      if (mode === 'sse') {
         // Walk every SSE event to EOF — message_delta (final output_tokens) is last.
         const m: OutputMeasurement = {
           textChars: 0,
@@ -863,24 +884,29 @@ function teeForUsage(res: Response): {
           usage: undefined,
           stopReason: undefined,
         };
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buf += decoder.decode(value, { stream: true });
-          // SSE events are terminated by a blank line; support LF and CRLF.
+        // SSE events are terminated by a blank line; support LF and CRLF. Run
+        // before the first read too: sniffing may already have buffered events.
+        const drainBuffered = (): void => {
           let boundary: RegExpExecArray | null;
           while ((boundary = /\r\n\r\n|\n\n|\r\r/.exec(buf)) !== null) {
             const block = buf.slice(0, boundary.index);
             buf = buf.slice(boundary.index + boundary[0].length);
             processSseEvent(block, m, state);
           }
+        };
+        drainBuffered();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          drainBuffered();
         }
         buf += decoder.decode();
         if (buf.trim().length > 0) processSseEvent(buf, m, state); // trailing partial event
         return { usage: state.usage, measurement: m, stopReason: state.stopReason };
       }
 
-      if (ct.includes('application/json')) {
+      if (mode === 'json') {
         // Buffer fully, capped at 4 MiB.
         const MAX = 4 * 1024 * 1024;
         while (buf.length < MAX) {

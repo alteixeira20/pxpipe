@@ -48,7 +48,9 @@ This mode is explicitly lossy and is **not** the default for coding work. Use it
 
 Safe profiles are deliberately narrower than the renderer's technical model support.
 
-At this reliability milestone, `coding-safe` and `balanced` transform **only `claude-fable-5`** by default. A dashboard model toggle or stale `PXPIPE_MODELS` value cannot silently broaden a safe profile to Gemini/GPT/Kimi. Other models pass through unchanged until their provider-specific transform has an equivalent coding non-inferiority evaluation.
+At this reliability milestone, `coding-safe` and `balanced` admit the Claude 5 family (`claude-fable-5`, `claude-opus-5`, `claude-sonnet-5`, `claude-haiku-5`), Gemini 3.6 Flash, and `gpt-5.6-sol`. A dashboard model toggle or stale `PXPIPE_MODELS` value cannot silently broaden a safe profile beyond that set. Other models pass through unchanged until their provider-specific transform has an equivalent coding non-inferiority evaluation.
+
+Admission is per resolved render profile, never per name. Every admitted Claude id resolves to the *same* `CLAUDE_PROFILE` object Fable 5 was validated on; `gpt-5.6-sol` and `gpt-5.6-sol-codex` resolve to the same `GPT56_SOL_PROFILE`. Ids that merely share a version number do not qualify: pre-4.7 Claude uses the `standard` vision tier (a 1568 px server-side downscale the dense 312-column strip was not measured against), and `gpt-5.6-terra` / `gpt-5.6-luna` use the generic 5.x flagship geometry (152 columns, a different font, and the `pairs` Responses planner instead of `mixed`).
 
 For explicit experiments, `aggressive` honors `PXPIPE_MODELS`, for example:
 
