@@ -62,6 +62,28 @@ describe('Codex economics report', () => {
     expect(report.transformedEffectiveSavedPct).toBeCloseTo(16.667, 3);
   });
 
+  it('excludes transformed rows without terminal usage from provider-grounded percentages', () => {
+    const withoutUsage = event({
+      compressed: true,
+      baseline_imaged_tokens: 10_000,
+      image_tokens: 100,
+      native_injected_tokens: 10,
+      stream_termination: 'client_aborted',
+    });
+    const report = buildCodexEconomicsReport([compressed(), withoutUsage]);
+
+    expect(report.transformedRequests).toBe(2);
+    expect(report.transformsWithoutUsage).toBe(1);
+    expect(report.providerInputTokens).toBe(1000);
+    // Only the usage-complete transform contributes to the percentage basis.
+    expect(report.baselineImagedTokens).toBe(500);
+    expect(report.imageTokens).toBe(100);
+    expect(report.nativeInjectedTokens).toBe(20);
+    expect(report.netRawSavedTokens).toBe(380);
+    expect(report.rawBaselineProviderInput).toBe(1380);
+    expect(report.note).toMatch(/excluded from token percentages/i);
+  });
+
   it('requires routed passthrough observations before calling the A/B sample ready', () => {
     const report = buildCodexEconomicsReport(
       Array.from({ length: CODEX_AB_MIN_PER_ARM }, compressed),
