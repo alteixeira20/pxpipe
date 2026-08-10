@@ -129,6 +129,10 @@ export interface TransformOptions {
     minCollapseUnits?: number;
     minCollapseTokens?: number;
   };
+  /** Maximum image-side/text-side token ratio accepted by the local Google
+   * profitability gate. Values below 1 require headroom for tokenizer/model
+   * estimation error; public Google still gets its provider countTokens check. */
+  googleMaxImageToTextRatio?: number;
   /** Re-pack image-bound text into a ↵-delimited stream to fill `cols` (~29%→75-80%
    *  glyph-fill). ON by default (98.95% char accuracy at L1 OCR eval, +1pp vs baseline).
    *  Hard newlines become visible ↵ glyphs — tell the model via system prompt. */
@@ -175,6 +179,7 @@ const DEFAULTS: Required<TransformOptions> = {
   collapseHistory: true,
   gptHistory: {},
   googleHistory: {},
+  googleMaxImageToTextRatio: 1,
   model: '',
   imagePlacement: 'synthetic_message',
   imageDetail: 'original',

@@ -175,4 +175,16 @@ export interface CurrentSessionPayload {
   rawBaselineTokens?: number;
   /** Raw output tokens — shown as an "untouched" note; output is never compressed. */
   rawOutputTokens?: number;
+  /** Provider-neutral task telemetry for controlled passthrough vs coding-safe A/B runs. */
+  requests?: number;
+  compressedRequests?: number;
+  providerInputTokens?: number;
+  providerOutputTokens?: number;
+  providerCacheReadTokens?: number;
+  providerCacheCreateTokens?: number;
+  toolCalls?: number;
+  readLikeCalls?: number;
+  repeatedReadLikeCalls?: number;
+  repeatedToolResults?: number;
+  breakerActive?: boolean;
 }

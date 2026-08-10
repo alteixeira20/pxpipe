@@ -258,12 +258,7 @@ function googleHistoryUnit(content: GoogleContent, index: number): GoogleHistory
 async function compressGoogleToolResults(
   contents: GoogleContent[],
   modelName: string,
-  options: {
-    compressToolResults?: boolean;
-    minToolResultChars?: number;
-    maxImagesPerToolResult?: number;
-    reflow?: boolean;
-  },
+  options: TransformOptions,
 ): Promise<GoogleToolResultPlan> {
   const empty = (): GoogleToolResultPlan => ({
     contents,
@@ -341,7 +336,8 @@ async function compressGoogleToolResults(
         (sheet ? `\n${sheet}` : '');
       const textTokens = googleTextTokens(raw);
       const pointerTokens = googleTextTokens(pointer);
-      if (imageTokens + pointerTokens >= textTokens) {
+      const maxRatio = Math.min(1, Math.max(0.05, options.googleMaxImageToTextRatio ?? 1));
+      if (imageTokens + pointerTokens >= textTokens * maxRatio) {
         rewrittenParts.push(rawPart);
         continue;
       }
@@ -417,6 +413,7 @@ async function planGoogleHistory(
   modelName: string,
   reflowEnabled: boolean,
   tuning: NonNullable<TransformOptions['googleHistory']> = {},
+  maxImageToTextRatio = 1,
 ): Promise<GoogleHistoryPlan | null> {
   const profile = resolveGeminiProfile();
   const keepTail = Math.max(0, Math.floor(tuning.keepTail ?? profile.history.keepTail));
@@ -463,7 +460,8 @@ async function planGoogleHistory(
   const nativeTokens = googleTextTokens(
     HISTORY_TRANSCRIPT_INTRO + factSheet + HISTORY_TRANSCRIPT_OUTRO,
   );
-  if (imageTokens + nativeTokens >= baselineTokens) return null;
+  const maxRatio = Math.min(1, Math.max(0.05, maxImageToTextRatio));
+  if (imageTokens + nativeTokens >= baselineTokens * maxRatio) return null;
   const droppedCodepoints = new Map<number, number>();
   let droppedChars = 0;
   for (const image of images) {
@@ -606,7 +604,10 @@ export async function transformGoogleGenerateContent(
       textTokens,
       burnImageSide: nativeInjectedTokens,
       burnTextSide: 0,
-      profitable: imageTokens + nativeInjectedTokens < textTokens,
+      profitable: imageTokens + nativeInjectedTokens < textTokens * Math.min(
+        1,
+        Math.max(0.05, options.googleMaxImageToTextRatio ?? 1),
+      ),
     };
     staticProfitable = info.gateEval.profitable
       && !(options.requireLosslessRender && staticDroppedChars > 0);
@@ -637,6 +638,7 @@ export async function transformGoogleGenerateContent(
         modelName,
         options.reflow !== false,
         options.googleHistory,
+        options.googleMaxImageToTextRatio ?? 1,
       );
   const historyRenderLossy = Boolean(
     plannedHistory

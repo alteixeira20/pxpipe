@@ -1012,8 +1012,8 @@ const CSS = `
   .chip.on { background: var(--flame-tint); color: var(--flame-ink); border-color: var(--flame);
     font-weight: 600; }
 
-  /* collapsed model-scope section (#116): the default compress scope is Fable 5
-     only, so the three family rows stay hidden until the user opts in. The
+  /* collapsed model-scope section (#116): validated safe families are active
+     by default while experimental families remain opt-in. The
      <details> wrapper lives in the static shell — NOT inside #frag-models —
      because the every-2s innerHTML poll would otherwise reset its open state. */
   .models-collapse { margin: 0 0 18px; }

@@ -235,6 +235,17 @@ interface SessionTotals {
   //   1 − (rawActual + rawOutput) / (rawBaseline + rawOutput)
   // Headlining input-only would cherry-pick the part that compresses.
   rawOutputTokens: number;
+  requests: number;
+  compressedRequests: number;
+  providerInputTokens: number;
+  providerOutputTokens: number;
+  providerCacheReadTokens: number;
+  providerCacheCreateTokens: number;
+  toolCalls: number;
+  readLikeCalls: number;
+  repeatedReadLikeCalls: number;
+  repeatedToolResults: number;
+  breakerActive: boolean;
 }
 
 interface Totals {
@@ -969,6 +980,17 @@ export class DashboardState {
           rawActualTokens: 0,
           rawBaselineTokens: 0,
           rawOutputTokens: 0,
+          requests: 0,
+          compressedRequests: 0,
+          providerInputTokens: 0,
+          providerOutputTokens: 0,
+          providerCacheReadTokens: 0,
+          providerCacheCreateTokens: 0,
+          toolCalls: 0,
+          readLikeCalls: 0,
+          repeatedReadLikeCalls: 0,
+          repeatedToolResults: 0,
+          breakerActive: false,
         };
         this.sessions.set(sid, s);
         // Cap memory — drop the first (oldest by insertion order) session
@@ -981,19 +1003,37 @@ export class DashboardState {
           if (firstKey !== undefined) this.sessions.delete(firstKey);
         }
       }
+      s.requests += 1;
+      if (compressed) s.compressedRequests += 1;
+      if (haveUsage) {
+        s.providerInputTokens += inp;
+        s.providerOutputTokens += out;
+        s.providerCacheReadTokens += cacheReadForRow;
+        s.providerCacheCreateTokens += cc;
+      }
+      if (ev.trajectory) {
+        s.toolCalls += ev.trajectory.newToolCalls;
+        s.readLikeCalls += ev.trajectory.newReadLikeCalls;
+        s.repeatedReadLikeCalls += ev.trajectory.repeatedReadLikeCalls;
+        s.repeatedToolResults += ev.trajectory.repeatedToolResults;
+        s.breakerActive ||= ev.trajectory.breakerActive;
+      }
       // Reuse the same haveUsage / haveBaseline guards + the
       // baselineInputEff / actualInputEff locals computed earlier in
       // update() so the lifetime totals block (above) and the per-session
       // block (here) read the same values. Re-deriving them here would
       // duplicate the cache-aware-baseline math and invite drift.
-      if (creditSaving && dollarEligible) {
-        s.baselineInputWeighted += baselineInputEff;
-        s.actualInputWeighted += actualInputEff;
-        s.baselineMeasuredCount += 1;
-        // RAW, rate-free compression: real tokens sent vs the same body as text.
+      if (creditSaving) {
+        // RAW, rate-free compression is provider-neutral. Keep it even when
+        // dollar pricing is intentionally unavailable (notably Google/AGY).
         s.rawActualTokens += rawActual;
         s.rawBaselineTokens += rawBaseline;
-        s.rawOutputTokens += out; // not compressed; added to BOTH sides for the honest total
+        s.rawOutputTokens += out;
+        if (dollarEligible) {
+          s.baselineInputWeighted += baselineInputEff;
+          s.actualInputWeighted += actualInputEff;
+          s.baselineMeasuredCount += 1;
+        }
       }
       // ALL-rows session bill — mirrors the global `if (haveUsage)` block
       // above (allActualInputWeighted / allOutputWeighted). Used as the
@@ -1334,6 +1374,17 @@ export class DashboardState {
       rawActualTokens: s.rawActualTokens,
       rawBaselineTokens: s.rawBaselineTokens,
       rawOutputTokens: s.rawOutputTokens,
+      requests: s.requests,
+      compressedRequests: s.compressedRequests,
+      providerInputTokens: s.providerInputTokens,
+      providerOutputTokens: s.providerOutputTokens,
+      providerCacheReadTokens: s.providerCacheReadTokens,
+      providerCacheCreateTokens: s.providerCacheCreateTokens,
+      toolCalls: s.toolCalls,
+      readLikeCalls: s.readLikeCalls,
+      repeatedReadLikeCalls: s.repeatedReadLikeCalls,
+      repeatedToolResults: s.repeatedToolResults,
+      breakerActive: s.breakerActive,
     });
   }
 

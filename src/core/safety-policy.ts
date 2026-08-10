@@ -80,6 +80,9 @@ const PROFILES: Record<CompressionProfileName, CompressionProfile> = {
         minCollapseUnits: 4,
         minCollapseTokens: 2_000,
       },
+      // Antigravity has no grounded public countTokens endpoint. Demand at
+      // least 20% local headroom before changing modality in the safest mode.
+      googleMaxImageToTextRatio: 0.80,
       keepSharp: shouldKeepToolResultSharp,
     },
   },
@@ -106,6 +109,7 @@ const PROFILES: Record<CompressionProfileName, CompressionProfile> = {
         minCollapseUnits: 2,
         minCollapseTokens: 1_500,
       },
+      googleMaxImageToTextRatio: 0.90,
       keepSharp: shouldKeepToolResultSharp,
     },
   },
@@ -127,6 +131,7 @@ const PROFILES: Record<CompressionProfileName, CompressionProfile> = {
         minCollapseUnits: 1,
         minCollapseTokens: 1_000,
       },
+      googleMaxImageToTextRatio: 1,
       reflow: true,
       keepSharp: () => false,
       emitRecoverable: false,
