@@ -120,6 +120,19 @@ export interface TransformOptions {
   collapseHistory?: boolean;
   /** GPT only: history-collapse tuning overrides (keepTail / collapseChunk / …). */
   gptHistory?: Partial<GptHistoryOptions>;
+  /** Google/Antigravity old-history tuning. Safe profiles deliberately keep a
+   *  larger recent tail than the model-level renderer default while allowing
+   *  sufficiently large, closed older history to collapse earlier than the
+   *  historical hard-coded 10-turn floor. */
+  googleHistory?: {
+    keepTail?: number;
+    minCollapseUnits?: number;
+    minCollapseTokens?: number;
+  };
+  /** Maximum image-side/text-side token ratio accepted by the local Google
+   * profitability gate. Values below 1 require headroom for tokenizer/model
+   * estimation error; public Google still gets its provider countTokens check. */
+  googleMaxImageToTextRatio?: number;
   /** Re-pack image-bound text into a ↵-delimited stream to fill `cols` (~29%→75-80%
    *  glyph-fill). ON by default (98.95% char accuracy at L1 OCR eval, +1pp vs baseline).
    *  Hard newlines become visible ↵ glyphs — tell the model via system prompt. */
@@ -165,6 +178,8 @@ const DEFAULTS: Required<TransformOptions> = {
   // GPT-only knobs; the Anthropic transform ignores them but Required<> needs them.
   collapseHistory: true,
   gptHistory: {},
+  googleHistory: {},
+  googleMaxImageToTextRatio: 1,
   model: '',
   imagePlacement: 'synthetic_message',
   imageDetail: 'original',

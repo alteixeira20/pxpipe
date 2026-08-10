@@ -81,6 +81,12 @@ export interface RecentRow {
   session_saved_so_far_delta?: number;
   img_id?: number;
   img_ids?: number[];
+  detail_id?: number;
+  decision_reason?: string;
+  history_reason?: string;
+  image_count?: number;
+  trajectory_repeated_read_like_calls?: number;
+  trajectory_breaker_active?: boolean;
   transformation_state?: string;
 }
 
@@ -169,4 +175,16 @@ export interface CurrentSessionPayload {
   rawBaselineTokens?: number;
   /** Raw output tokens — shown as an "untouched" note; output is never compressed. */
   rawOutputTokens?: number;
+  /** Provider-neutral task telemetry for controlled passthrough vs coding-safe A/B runs. */
+  requests?: number;
+  compressedRequests?: number;
+  providerInputTokens?: number;
+  providerOutputTokens?: number;
+  providerCacheReadTokens?: number;
+  providerCacheCreateTokens?: number;
+  toolCalls?: number;
+  readLikeCalls?: number;
+  repeatedReadLikeCalls?: number;
+  repeatedToolResults?: number;
+  breakerActive?: boolean;
 }

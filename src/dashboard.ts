@@ -151,6 +151,14 @@ export interface RecentRow {
    *  ring (the id stays on the row but no longer fetches). */
   img_id?: number;
   img_ids?: number[];
+  /** Stable in-process request-detail id. Unlike img_id it exists for text-only
+   * decisions, so operators can inspect why a request was not imaged. */
+  detail_id?: number;
+  decision_reason?: string;
+  history_reason?: string;
+  image_count?: number;
+  trajectory_repeated_read_like_calls?: number;
+  trajectory_breaker_active?: boolean;
 }
 
 /** Aggregate over the whole session. Reset on process restart unless
@@ -227,6 +235,17 @@ interface SessionTotals {
   //   1 − (rawActual + rawOutput) / (rawBaseline + rawOutput)
   // Headlining input-only would cherry-pick the part that compresses.
   rawOutputTokens: number;
+  requests: number;
+  compressedRequests: number;
+  providerInputTokens: number;
+  providerOutputTokens: number;
+  providerCacheReadTokens: number;
+  providerCacheCreateTokens: number;
+  toolCalls: number;
+  readLikeCalls: number;
+  repeatedReadLikeCalls: number;
+  repeatedToolResults: number;
+  breakerActive: boolean;
 }
 
 interface Totals {
@@ -536,6 +555,9 @@ export class DashboardState {
   /** Monotonic image id source. Never reset, never reused — an evicted id
    *  stays dangling on its RecentRow rather than pointing at a new image. */
   private nextImageId = 1;
+  /** Monotonic id for request-decision details. Separate from image ids so a
+   * text-only request still has a Details view explaining the gate outcome. */
+  private nextDetailId = 1;
   /** Runtime kill switch for compression. When false, the proxy forwards
    *  /v1/messages unchanged to upstream — pure passthrough, no images,
    *  no transforms. Controlled by the dashboard "passthrough" toggle so
@@ -661,6 +683,7 @@ export class DashboardState {
 
     const u = ev.usage;
     const info = ev.info;
+    const detailId = info ? this.nextDetailId++ : undefined;
     const compressed = info?.compressed === true;
     const totals = this.totalsForModel(ev.model);
 
@@ -847,11 +870,11 @@ export class DashboardState {
     // columns (baselineInputEff / actualInputEff) — the two panels can no longer
     // disagree. Raw counts are kept for the cache-blind sub-line. Gate on
     // haveUsage so an in-flight request doesn't render a bogus "-100%".
-    if (info && haveUsage && imgId !== undefined) {
-      // Key by the request's first image id so the recent table's "view" link
-      // (which carries that id) maps straight to this breakdown.
+    if (info && haveUsage && detailId !== undefined) {
+      // Key by a request-detail id rather than an image id: text-only decisions
+      // are just as important to inspect as transformed ones.
       this.contextHistory.push({
-        id: imgId,
+        id: detailId,
         baselineTokens: baselineForRow,
         realInput: rawActual,
         baselineInputEff,
@@ -869,6 +892,10 @@ export class DashboardState {
         imageIds: [...imgIds],
         compressed,
         model: ev.model,
+        reason: info.reason,
+        historyReason: info.historyReason,
+        trajectoryRepeatedReads: ev.trajectory?.repeatedReadLikeCalls,
+        trajectoryBreakerActive: ev.trajectory?.breakerActive,
         responsesComposition: info.responsesComposition,
         responsesUnexplainedTokens: info.responsesComposition
           ? Math.max(0, rawBaseline - info.responsesComposition.totalLocal)
@@ -953,6 +980,17 @@ export class DashboardState {
           rawActualTokens: 0,
           rawBaselineTokens: 0,
           rawOutputTokens: 0,
+          requests: 0,
+          compressedRequests: 0,
+          providerInputTokens: 0,
+          providerOutputTokens: 0,
+          providerCacheReadTokens: 0,
+          providerCacheCreateTokens: 0,
+          toolCalls: 0,
+          readLikeCalls: 0,
+          repeatedReadLikeCalls: 0,
+          repeatedToolResults: 0,
+          breakerActive: false,
         };
         this.sessions.set(sid, s);
         // Cap memory — drop the first (oldest by insertion order) session
@@ -965,19 +1003,37 @@ export class DashboardState {
           if (firstKey !== undefined) this.sessions.delete(firstKey);
         }
       }
+      s.requests += 1;
+      if (compressed) s.compressedRequests += 1;
+      if (haveUsage) {
+        s.providerInputTokens += inp;
+        s.providerOutputTokens += out;
+        s.providerCacheReadTokens += cacheReadForRow;
+        s.providerCacheCreateTokens += cc;
+      }
+      if (ev.trajectory) {
+        s.toolCalls += ev.trajectory.newToolCalls;
+        s.readLikeCalls += ev.trajectory.newReadLikeCalls;
+        s.repeatedReadLikeCalls += ev.trajectory.repeatedReadLikeCalls;
+        s.repeatedToolResults += ev.trajectory.repeatedToolResults;
+        s.breakerActive ||= ev.trajectory.breakerActive;
+      }
       // Reuse the same haveUsage / haveBaseline guards + the
       // baselineInputEff / actualInputEff locals computed earlier in
       // update() so the lifetime totals block (above) and the per-session
       // block (here) read the same values. Re-deriving them here would
       // duplicate the cache-aware-baseline math and invite drift.
-      if (creditSaving && dollarEligible) {
-        s.baselineInputWeighted += baselineInputEff;
-        s.actualInputWeighted += actualInputEff;
-        s.baselineMeasuredCount += 1;
-        // RAW, rate-free compression: real tokens sent vs the same body as text.
+      if (creditSaving) {
+        // RAW, rate-free compression is provider-neutral. Keep it even when
+        // dollar pricing is intentionally unavailable (notably Google/AGY).
         s.rawActualTokens += rawActual;
         s.rawBaselineTokens += rawBaseline;
-        s.rawOutputTokens += out; // not compressed; added to BOTH sides for the honest total
+        s.rawOutputTokens += out;
+        if (dollarEligible) {
+          s.baselineInputWeighted += baselineInputEff;
+          s.actualInputWeighted += actualInputEff;
+          s.baselineMeasuredCount += 1;
+        }
       }
       // ALL-rows session bill — mirrors the global `if (haveUsage)` block
       // above (allActualInputWeighted / allOutputWeighted). Used as the
@@ -1024,6 +1080,12 @@ export class DashboardState {
         creditSaving ? round1(baselineInputEff - actualInputEff) : undefined,
       img_id: imgId,
       img_ids: imgIds,
+      detail_id: detailId,
+      decision_reason: info?.reason,
+      history_reason: info?.historyReason,
+      image_count: info?.imageCount,
+      trajectory_repeated_read_like_calls: ev.trajectory?.repeatedReadLikeCalls,
+      trajectory_breaker_active: ev.trajectory?.breakerActive,
     };
     this.recent.push(row);
     if (this.recent.length > RECENT_CAP) this.recent.splice(0, this.recent.length - RECENT_CAP);
@@ -1199,10 +1261,11 @@ export class DashboardState {
       // event with the same cache-weighted math as the live update() path.
       const imageCount = (t as { image_count?: number }).image_count ?? 0;
       let imgId: number | undefined;
-      if (compressed && haveUsage && (imageCount > 0 || rawBaseline > 0)) {
-        imgId = this.nextImageId++;
+      const detailId = haveUsage ? this.nextDetailId++ : undefined;
+      if (compressed && imageCount > 0) imgId = this.nextImageId++;
+      if (haveUsage && detailId !== undefined) {
         this.contextHistory.push({
-          id: imgId,
+          id: detailId,
           baselineTokens: baselineForRow,
           realInput: rawActual,
           baselineInputEff,
@@ -1220,6 +1283,10 @@ export class DashboardState {
           imageIds: [], // PNG ring is in-memory; not restorable across restart
           compressed,
           model: t.model,
+          reason: (t as { reason?: string }).reason,
+          historyReason: (t as { history_reason?: string }).history_reason,
+          trajectoryRepeatedReads: (t as { trajectory_repeated_read_like_calls?: number }).trajectory_repeated_read_like_calls,
+          trajectoryBreakerActive: (t as { trajectory_breaker_active?: boolean }).trajectory_breaker_active,
           responsesComposition: (t as { responses_composition?: ContextMapData['responsesComposition'] }).responses_composition,
           responsesUnexplainedTokens: (t as { responses_composition?: ContextMapData['responsesComposition'] }).responses_composition
             ? Math.max(0, rawBaseline - ((t as { responses_composition?: ContextMapData['responsesComposition'] }).responses_composition?.totalLocal ?? 0))
@@ -1249,6 +1316,12 @@ export class DashboardState {
           creditSaving ? round1(baselineInputEff - actualInputEff) : undefined,
         img_id: imgId,
         img_ids: imgId !== undefined ? [imgId] : undefined,
+        detail_id: detailId,
+        decision_reason: t.reason,
+        history_reason: t.history_reason,
+        image_count: imageCount,
+        trajectory_repeated_read_like_calls: t.trajectory_repeated_read_like_calls,
+        trajectory_breaker_active: t.trajectory_breaker_active,
       };
       this.recent.push(row);
     }
@@ -1301,6 +1374,17 @@ export class DashboardState {
       rawActualTokens: s.rawActualTokens,
       rawBaselineTokens: s.rawBaselineTokens,
       rawOutputTokens: s.rawOutputTokens,
+      requests: s.requests,
+      compressedRequests: s.compressedRequests,
+      providerInputTokens: s.providerInputTokens,
+      providerOutputTokens: s.providerOutputTokens,
+      providerCacheReadTokens: s.providerCacheReadTokens,
+      providerCacheCreateTokens: s.providerCacheCreateTokens,
+      toolCalls: s.toolCalls,
+      readLikeCalls: s.readLikeCalls,
+      repeatedReadLikeCalls: s.repeatedReadLikeCalls,
+      repeatedToolResults: s.repeatedToolResults,
+      breakerActive: s.breakerActive,
     });
   }
 

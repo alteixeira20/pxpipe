@@ -445,6 +445,10 @@ export interface ContextMapData {
    * Can include envelope, tokenizer, and server-side additions. */
   responsesUnexplainedTokens?: number;
   restored?: boolean; // rebuilt from JSONL after a restart — PNG thumbnails are gone
+  reason?: string;
+  historyReason?: string;
+  trajectoryRepeatedReads?: number;
+  trajectoryBreakerActive?: boolean;
 }
 
 const CTXMAP_BUCKETS: ReadonlyArray<readonly [string, string]> = [
@@ -466,7 +470,7 @@ export function renderContextMapFragment(
   if (notFound) {
     return `<div class="ctxmap"><div class="empty-note">That request's breakdown isn't kept anymore — only the most recent requests are. Pick <strong>Details</strong> on a newer row.</div></div>`;
   }
-  if (!c || (c.baselineTokens <= 0 && c.imageCount <= 0)) {
+  if (!c) {
     return `<div class="ctxmap"><div class="empty-note">Pick <strong>Details</strong> on a request to see exactly which parts became images and which stayed as text.</div></div>`;
   }
   // Cache-aware billing-equivalent basis — identical to the recent row's
@@ -568,6 +572,15 @@ export function renderContextMapFragment(
           ? `Billed = after cache discounts (reads at 0.1×), same basis as the Saved column. The raw text is ${rawShrink}% smaller, but most of it would have been a cheap cache-read — so imaging it cost more.`
           : `Billed = after cache discounts (reads at 0.1×), same basis as the Saved column. ${rawPhrase}`;
   const title = isLatest ? 'Latest request' : 'Selected request';
+  const decisionNote = c.imageCount <= 0
+    ? `<div class="decision-note"><strong>Why no image:</strong> ${escapeHtml(decisionExplanation(c.reason, c.historyReason))}` +
+      (c.trajectoryBreakerActive
+        ? ` <strong>Safety breaker active:</strong> repeated retrievals after earlier compression forced native text.`
+        : (c.trajectoryRepeatedReads ?? 0) > 0
+          ? ` Repeated read/search actions observed this turn: ${c.trajectoryRepeatedReads}.`
+          : '') +
+      `</div>`
+    : '';
 
   // The provider caps a request at 100 image blocks and counts the CLIENT's
   // images against the same limit. Three facts are worth showing, and only when
@@ -595,6 +608,7 @@ export function renderContextMapFragment(
     `<div class="ctxmap">` +
     `<div class="ctx-headline"><span class="ctx-title">${title}</span> ${headline}</div>` +
     `<div class="split-note ctx-subnote">${subnote}</div>` +
+    decisionNote +
     `<div class="legend"><span class="tag tag-img">Became an image</span><span class="tag tag-txt">Stayed as text</span></div>` +
     `<div class="split">` +
     `<div class="split-col split-img">` +
@@ -614,6 +628,26 @@ export function renderContextMapFragment(
     gallery +
     `</div>`
   );
+}
+
+function decisionExplanation(reason: string | undefined, historyReason: string | undefined): string {
+  const r = reason ?? '';
+  if (r === 'compression_disabled') return 'Compression is disabled for this request.';
+  if (r === 'unsupported_model') return 'The model is outside the active validated compression scope.';
+  if (r === 'render_lossy') return 'The renderer reported character loss, so coding-safe kept the original text.';
+  if (r === 'no_static_context') {
+    if (historyReason === 'no_history') return 'Fresh request: coding-safe keeps live authority/tool state native and there is no old closed history yet.';
+    return 'No eligible static context was present; live working state stayed native.';
+  }
+  if (r === 'below_threshold') {
+    if (historyReason === 'no_history') return 'Fresh request: there is not enough old closed history to image safely yet.';
+    return 'Eligible context exists, but it has not crossed the safe compression threshold.';
+  }
+  if (r.startsWith('not_profitable')) return 'PXPipe estimated that images would not beat the text token cost, so it kept text.';
+  if (r === 'count_tokens_failed') return 'Provider validation was unavailable, so PXPipe failed closed to native text.';
+  if (historyReason === 'no_history') return 'No old closed history is eligible yet; coding-safe intentionally leaves this request as text.';
+  if (historyReason === 'not_profitable') return 'Old history exists, but rendering it would not reduce provider input tokens.';
+  return r ? `PXPipe kept text: ${r}.` : 'PXPipe kept this request as native text under the current safety policy.';
 }
 
 function statusCls(status: number): string {
@@ -654,10 +688,10 @@ export function renderRecentFragment(p: RecentPayload): string {
       ? `<tr><td colspan="10" class="empty-cell">No requests yet — they stream in here live.</td></tr>`
       : rows
           .map((e: RecentRow, i: number) => {
-            const viewId = (e.img_ids ?? (e.img_id != null ? [e.img_id] : []))[0];
+            const detailId = e.detail_id ?? (e.img_ids ?? (e.img_id != null ? [e.img_id] : []))[0];
             const viewLink =
-              viewId != null
-                ? `<a class="row-view" href="#" hx-get="/fragments/context-map?req=${viewId}" hx-target="#frag-context-map" hx-swap="innerHTML">Details →</a>`
+              detailId != null
+                ? `<a class="row-view" href="#" hx-get="/fragments/context-map?req=${detailId}" hx-target="#frag-context-map" hx-swap="innerHTML">Details →</a>`
                 : `<span class="muted">—</span>`;
             const saved = e.session_saved_so_far_delta;
             // A loss that disappears when the newly written prefix is repriced at
@@ -681,13 +715,16 @@ export function renderRecentFragment(p: RecentPayload): string {
                   ? `<td class="num neg">${numFmt(saved)}${createNote}</td>`
                   : `<td class="num">0</td>`;
             const imaged = renderTransformationStateBadge(e);
+            const decision = !e.compressed
+              ? `<div class="decision-mini">${escapeHtml(decisionExplanation(e.decision_reason, e.history_reason))}</div>`
+              : '';
             return (
               `<tr>` +
               `<td class="muted">${i + 1}</td>` +
               `<td><span class="pill pill-${statusCls(e.status)}">${e.status}</span></td>` +
               `<td class="endp">${escapeHtml(shortPath(e.path))}</td>` +
               `<td>${e.model ? `<code>${escapeHtml(e.model)}</code>` : '<span class="muted">—</span>'}</td>` +
-              `<td>${imaged}</td>` +
+              `<td>${imaged}${decision}</td>` +
               `<td class="num">${e.cache_read != null ? numFmt(e.cache_read) : '—'}</td>` +
               `<td class="num">${e.baseline_input != null ? numFmt(e.baseline_input) : '—'}</td>` +
               `<td class="num">${e.actual_input != null ? numFmt(e.actual_input) : '—'}</td>` +
@@ -944,6 +981,8 @@ const CSS = `
     box-shadow: var(--shadow); }
   .switch-btn:hover { border-color: var(--flame); color: var(--flame-ink); }
   .hint { color: var(--muted); font-size: 11px; }
+  .decision-mini { margin-top: 3px; max-width: 260px; color: var(--muted); font-size: 10.5px; line-height: 1.25; }
+  .decision-note { margin: 10px 0; padding: 9px 11px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); color: var(--ink-2); font-size: 12px; }
   .theme-btn { background: var(--surface); color: var(--ink-2); border: 1px solid var(--border-strong);
     padding: 5px 11px; cursor: pointer; border-radius: 8px; font: inherit; font-size: 12px; font-weight: 600;
     box-shadow: var(--shadow); display: inline-flex; align-items: center; gap: 6px; line-height: 1; }
@@ -973,8 +1012,8 @@ const CSS = `
   .chip.on { background: var(--flame-tint); color: var(--flame-ink); border-color: var(--flame);
     font-weight: 600; }
 
-  /* collapsed model-scope section (#116): the default compress scope is Fable 5
-     only, so the three family rows stay hidden until the user opts in. The
+  /* collapsed model-scope section (#116): validated safe families are active
+     by default while experimental families remain opt-in. The
      <details> wrapper lives in the static shell — NOT inside #frag-models —
      because the every-2s innerHTML poll would otherwise reset its open state. */
   .models-collapse { margin: 0 0 18px; }
