@@ -81,6 +81,9 @@ describe('trajectory guard', () => {
     expect(latest?.breakerActive).toBe(true);
     const next = await observeAnthropicTrajectory(request([
       { id: 'a', name: 'Read', input: { file_path: '/repo/src/a.ts' } },
+      { id: 'repeat-0', name: 'Read', input: { file_path: '/repo/src/a.ts' } },
+      { id: 'repeat-1', name: 'Read', input: { file_path: '/repo/src/a.ts' } },
+      { id: 'repeat-2', name: 'Read', input: { file_path: '/repo/src/a.ts' } },
     ]));
     expect(next?.breakerActive).toBe(true);
   });

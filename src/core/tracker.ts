@@ -149,13 +149,18 @@ export interface TrackEvent {
   // Privacy-preserving coding-agent trajectory telemetry. No raw tool inputs,
   // paths, prompts or result contents are persisted.
   trajectory_session_sha8?: string;
+  trajectory_lineage_sha8?: string;
+  trajectory_lineage_epoch?: number;
+  trajectory_lineage_reset?: boolean;
   trajectory_new_tool_calls?: number;
   trajectory_new_read_like_calls?: number;
   trajectory_repeated_read_like_calls?: number;
+  trajectory_repeated_reads_after_compression?: number;
   trajectory_repeated_tool_results?: number;
   trajectory_compression_exposed?: boolean;
   trajectory_breaker_triggered?: boolean;
   trajectory_breaker_active?: boolean;
+  trajectory_breaker_reason?: string;
 
   // From Anthropic/OpenAI Usage:
   input_tokens?: number;
@@ -250,10 +255,16 @@ export function toTrackEvent(ev: ProxyEvent): TrackEvent {
   if (ev.firstByteMs !== undefined) out.first_byte_ms = ev.firstByteMs;
   if (ev.trajectory) {
     out.trajectory_session_sha8 = ev.trajectory.sessionSha8;
+    if (ev.trajectory.lineageSha8) out.trajectory_lineage_sha8 = ev.trajectory.lineageSha8;
+    if (ev.trajectory.lineageEpoch > 0) out.trajectory_lineage_epoch = ev.trajectory.lineageEpoch;
+    if (ev.trajectory.lineageReset) out.trajectory_lineage_reset = true;
     if (ev.trajectory.newToolCalls > 0) out.trajectory_new_tool_calls = ev.trajectory.newToolCalls;
     if (ev.trajectory.newReadLikeCalls > 0) out.trajectory_new_read_like_calls = ev.trajectory.newReadLikeCalls;
     if (ev.trajectory.repeatedReadLikeCalls > 0) {
       out.trajectory_repeated_read_like_calls = ev.trajectory.repeatedReadLikeCalls;
+    }
+    if (ev.trajectory.repeatedReadsAfterCompression > 0) {
+      out.trajectory_repeated_reads_after_compression = ev.trajectory.repeatedReadsAfterCompression;
     }
     if (ev.trajectory.repeatedToolResults > 0) {
       out.trajectory_repeated_tool_results = ev.trajectory.repeatedToolResults;
@@ -261,6 +272,7 @@ export function toTrackEvent(ev: ProxyEvent): TrackEvent {
     if (ev.trajectory.compressionExposed) out.trajectory_compression_exposed = true;
     if (ev.trajectory.breakerTriggered) out.trajectory_breaker_triggered = true;
     if (ev.trajectory.breakerActive) out.trajectory_breaker_active = true;
+    if (ev.trajectory.breakerReason) out.trajectory_breaker_reason = ev.trajectory.breakerReason;
   }
   if (ev.error) out.error = ev.error;
   if (ev.errorBody) out.error_body = ev.errorBody;

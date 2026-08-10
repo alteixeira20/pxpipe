@@ -530,7 +530,7 @@ export function hasGlyph(
  * deterministically to ASCII [U+HEX].
  */
 function isEscapeExempt(cp: number): boolean {
-  return cp >= 0x0001 && cp < 0x0020;
+  return cp === 0x0001 || cp === 0x0002 || cp === 0x0003;
 }
 
 /**

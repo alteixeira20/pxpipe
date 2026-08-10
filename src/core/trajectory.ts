@@ -38,18 +38,32 @@ interface SessionState {
   hadCompression: boolean;
   repeatedReadsAfterCompression: number;
   breakerActive: boolean;
+  breakerReason?: string;
   touchedAt: number;
+  lineageSha8: string;
+  lineageEpoch: number;
+  maxHistoryLength: number;
+  firstUserMaterial: string;
+  forwardProgressCount: number;
 }
 
 export interface TrajectoryObservation {
   /** Non-reversible SHA-256 prefix derived from model + first user turn. */
   sessionSha8: string;
+  /** Non-reversible SHA-256 prefix representing current lineage epoch. */
+  lineageSha8: string;
+  /** Monotonically increasing epoch index incremented on lineage reset. */
+  lineageEpoch: number;
+  /** True when context shrink or history rewrite reset trajectory state this turn. */
+  lineageReset: boolean;
   /** Newly observed tool_use ids on this request, excluding history already seen. */
   newToolCalls: number;
   /** Newly observed Read/Grep/Glob/search-like calls. */
   newReadLikeCalls: number;
   /** New read-like calls whose exact tool name + canonical input was seen earlier. */
   repeatedReadLikeCalls: number;
+  /** Accumulated repeated reads after compression in this lineage. */
+  repeatedReadsAfterCompression: number;
   /** New tool results whose exact content hash was already seen under another result id. */
   repeatedToolResults: number;
   /** Whether PXPipe has already rendered context in this session. */
@@ -58,6 +72,8 @@ export interface TrajectoryObservation {
   breakerTriggered: boolean;
   /** Sticky session-local circuit breaker; hosts should pass the request through as text. */
   breakerActive: boolean;
+  /** Human-readable reason why breaker triggered, e.g. 'repeated_read_like_calls'. */
+  breakerReason?: string;
 }
 
 const sessions = new Map<string, SessionState>();
@@ -149,9 +165,52 @@ function getSession(key: string): SessionState {
     repeatedReadsAfterCompression: 0,
     breakerActive: false,
     touchedAt: Date.now(),
+    lineageSha8: '',
+    lineageEpoch: 0,
+    maxHistoryLength: 0,
+    firstUserMaterial: '',
+    forwardProgressCount: 0,
   };
   touchSession(key, state);
   return state;
+}
+
+async function updateLineage(
+  state: SessionState,
+  model: string,
+  sessionMaterial: string,
+  currentLength: number,
+  firstUser: string,
+): Promise<{ lineageSha8: string; lineageReset: boolean }> {
+  const isLengthShrink = state.maxHistoryLength > 0 && currentLength < state.maxHistoryLength - 5;
+  const isFirstUserChange = state.firstUserMaterial !== '' && firstUser !== state.firstUserMaterial;
+
+  let lineageReset = false;
+  if (isLengthShrink || isFirstUserChange) {
+    lineageReset = true;
+    state.lineageEpoch += 1;
+    state.seenToolUseIds.clear();
+    state.readFingerprints.clear();
+    state.seenToolResultIds.clear();
+    state.toolResultHashes.clear();
+    state.seenGoogleCallOccurrences.clear();
+    state.seenGoogleResultOccurrences.clear();
+    state.hadCompression = false;
+    state.repeatedReadsAfterCompression = 0;
+    state.breakerActive = false;
+    state.breakerReason = undefined;
+    state.forwardProgressCount = 0;
+  }
+
+  state.firstUserMaterial = firstUser;
+  state.maxHistoryLength = Math.max(isLengthShrink ? currentLength : state.maxHistoryLength, currentLength);
+  const lineageSha8 = await sha256Prefix(
+    `${model}\n${sessionMaterial}\n${firstUser}\nepoch:${state.lineageEpoch}`,
+    8,
+  );
+  state.lineageSha8 = lineageSha8;
+
+  return { lineageSha8, lineageReset };
 }
 
 /**
@@ -162,7 +221,7 @@ function getSession(key: string): SessionState {
  * ids let PXPipe count only newly observed actions rather than charging the full
  * transcript again. An exact repeated read/search fingerprint after PXPipe has
  * actually rendered context is treated as a possible rediscovery loop. Three
- * such repeats open a sticky session-local pass-through circuit breaker.
+ * such repeats open a session-local pass-through circuit breaker.
  */
 export async function observeAnthropicTrajectory(
   body: Uint8Array,
@@ -183,8 +242,17 @@ export async function observeAnthropicTrajectory(
     : typeof parsed.model === 'string'
       ? parsed.model
       : '';
-  const sessionSha8 = await sha256Prefix(`${model}\n${firstUserMaterial(messages)}`, 8);
+  const firstUser = firstUserMaterial(messages);
+  const sessionSha8 = await sha256Prefix(`${model}\n${firstUser}`, 8);
   const state = getSession(sessionSha8);
+  const { lineageSha8, lineageReset } = await updateLineage(
+    state,
+    model,
+    firstUser,
+    messages.length,
+    firstUser,
+  );
+
   let newToolCalls = 0;
   let newReadLikeCalls = 0;
   let repeatedReadLikeCalls = 0;
@@ -242,18 +310,39 @@ export async function observeAnthropicTrajectory(
     && state.repeatedReadsAfterCompression >= REPEAT_BREAKER_THRESHOLD
   ) {
     state.breakerActive = true;
+    state.breakerReason = 'repeated_read_like_calls';
     breakerTriggered = true;
   }
+
+  if (newToolCalls > 0) {
+    if (repeatedReadLikeCalls === 0) {
+      state.forwardProgressCount += newToolCalls;
+      if (state.breakerActive && state.forwardProgressCount >= 5) {
+        state.breakerActive = false;
+        state.breakerReason = undefined;
+        state.repeatedReadsAfterCompression = 0;
+        state.forwardProgressCount = 0;
+      }
+    } else {
+      state.forwardProgressCount = 0;
+    }
+  }
+
   touchSession(sessionSha8, state);
   return {
     sessionSha8,
+    lineageSha8,
+    lineageEpoch: state.lineageEpoch,
+    lineageReset,
     newToolCalls,
     newReadLikeCalls,
     repeatedReadLikeCalls,
+    repeatedReadsAfterCompression: state.repeatedReadsAfterCompression,
     repeatedToolResults,
     compressionExposed: state.hadCompression,
     breakerTriggered,
     breakerActive: state.breakerActive,
+    breakerReason: state.breakerReason,
   };
 }
 
@@ -329,6 +418,14 @@ export async function observeGoogleTrajectory(
   if (!sessionMaterial) return undefined;
   const sessionSha8 = await sha256Prefix(`${model}\n${sessionMaterial}`, 8);
   const state = getSession(sessionSha8);
+  const { lineageSha8, lineageReset } = await updateLineage(
+    state,
+    model,
+    sessionMaterial,
+    contents.length,
+    firstUser,
+  );
+
   let newToolCalls = 0;
   let newReadLikeCalls = 0;
   let repeatedReadLikeCalls = 0;
@@ -389,18 +486,39 @@ export async function observeGoogleTrajectory(
     && state.repeatedReadsAfterCompression >= REPEAT_BREAKER_THRESHOLD
   ) {
     state.breakerActive = true;
+    state.breakerReason = 'repeated_read_like_calls';
     breakerTriggered = true;
   }
+
+  if (newToolCalls > 0) {
+    if (repeatedReadLikeCalls === 0) {
+      state.forwardProgressCount += newToolCalls;
+      if (state.breakerActive && state.forwardProgressCount >= 5) {
+        state.breakerActive = false;
+        state.breakerReason = undefined;
+        state.repeatedReadsAfterCompression = 0;
+        state.forwardProgressCount = 0;
+      }
+    } else {
+      state.forwardProgressCount = 0;
+    }
+  }
+
   touchSession(sessionSha8, state);
   return {
     sessionSha8,
+    lineageSha8,
+    lineageEpoch: state.lineageEpoch,
+    lineageReset,
     newToolCalls,
     newReadLikeCalls,
     repeatedReadLikeCalls,
+    repeatedReadsAfterCompression: state.repeatedReadsAfterCompression,
     repeatedToolResults,
     compressionExposed: state.hadCompression,
     breakerTriggered,
     breakerActive: state.breakerActive,
+    breakerReason: state.breakerReason,
   };
 }
 
