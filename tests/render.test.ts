@@ -256,11 +256,10 @@ describe('renderer', () => {
     expect(img.charsRendered).toBe(10); // 'hi ' (3) + 😀 (1) + ' world' (6) = 10
   });
 
-  it('treats escape-exempt invisibles as dropped with 1-cell advance (e.g. VS16)', async () => {
-    // U+FE0F (variation selector-16) is deliberately NOT escaped — it's an
-    // emoji presentation modifier, noise if spelled out. Renderer must advance
-    // by 1 cell and bump the counter.
-    const img = await renderChunkToPng('hi ️ world');
+  it('treats unrenderable exempt internal slot markers as dropped with 1-cell advance', async () => {
+    // Internal C0 control markers (e.g. \u0003) are exempt from escaping so slot-string
+    // positional alignment is preserved. Renderer advances by 1 cell and bumps droppedChars.
+    const img = await renderChunkToPng('hi \u0003 world');
     expect(img.droppedChars).toBe(1);
   });
 
@@ -386,21 +385,20 @@ describe('renderer', () => {
   });
 
   it('droppedCodepoints map is populated correctly when drops occur', async () => {
-    // Emoji now escape to [U+HEX] instead of dropping, so the drop path is
-    // exercised via an escape-EXEMPT codepoint: U+FE0F (variation selector).
+    // Exercised via an escape-EXEMPT internal C0 control marker: U+0003.
     // The codepoint should appear in the map with count 1.
-    const img = await renderChunkToPng('hi ️ there');
+    const img = await renderChunkToPng('hi \u0003 there');
     expect(img.droppedChars).toBe(1);
     expect(img.droppedCodepoints.size).toBe(1);
-    expect(img.droppedCodepoints.get(0xfe0f)).toBe(1);
+    expect(img.droppedCodepoints.get(0x0003)).toBe(1);
   });
 
   it('droppedCodepoints tallies repeat drops correctly', async () => {
     // Three occurrences of the same dropped (exempt) codepoint → count 3.
-    const img = await renderChunkToPng('a️b️c️');
+    const img = await renderChunkToPng('a\u0003b\u0003c\u0003');
     expect(img.droppedChars).toBe(3);
     expect(img.droppedCodepoints.size).toBe(1);
-    expect(img.droppedCodepoints.get(0xfe0f)).toBe(3);
+    expect(img.droppedCodepoints.get(0x0003)).toBe(3);
   });
 
   // --- Whitespace minify (HANDOFF R1) ---------------------------------------
@@ -1783,19 +1781,17 @@ describe('transform', () => {
   // capture & inspect the request body.
 
   it('populates droppedCodepointsTop when drops occur, sorted by count', async () => {
-    // System slab forces compression. Emoji now escape to [U+HEX] instead of
-    // dropping, so the drop path is exercised via escape-EXEMPT codepoints:
-    // plane-14 variation selectors (U+E01xx — astral, guaranteed absent from
-    // the BMP atlas, and deliberately never escaped). Three distinct
-    // codepoints at different rates so we can verify the sort order.
-    const cpA = String.fromCodePoint(0xe0100);
-    const cpB = String.fromCodePoint(0xe0104);
-    const cpC = String.fromCodePoint(0xe010a);
+    // System slab forces compression. Source Unicode now escapes to [U+HEX] instead of
+    // dropping, so the drop path is exercised via escape-EXEMPT C0 control codepoints (U+0001..U+0003).
+    // Three distinct codepoints at different rates so we can verify the sort order.
+    const cpA = String.fromCharCode(3);
+    const cpB = String.fromCharCode(2);
+    const cpC = String.fromCharCode(1);
     const sys =
       'x'.repeat(150000) + // bulk to force compression
-      '\n' + cpA.repeat(10) +  // 10 drops of U+E0100
-      '\n' + cpB.repeat(3) +   // 3  drops of U+E0104
-      '\n' + cpC.repeat(1);    // 1  drop  of U+E010A
+      '\n' + cpA.repeat(10) +  // 10 drops of U+0003
+      '\n' + cpB.repeat(3) +   // 3  drops of U+0002
+      '\n' + cpC.repeat(1);    // 1  drop  of U+0001
     const req = JSON.stringify({
       model: 'claude-3-5-sonnet',
       messages: [{ role: 'user', content: 'hi' }],
@@ -1806,9 +1802,9 @@ describe('transform', () => {
     expect(info.droppedChars).toBeGreaterThanOrEqual(14);
     expect(info.droppedCodepointsTop).toBeDefined();
     const top = info.droppedCodepointsTop!;
-    expect(top['U+E0100']).toBe(10);
-    expect(top['U+E0104']).toBe(3);
-    expect(top['U+E010A']).toBe(1);
+    expect(top['U+0003']).toBe(10);
+    expect(top['U+0002']).toBe(3);
+    expect(top['U+0001']).toBe(1);
     // Ensure key format is the expected U+HHHH uppercase with no surprises.
     for (const k of Object.keys(top)) {
       expect(k).toMatch(/^U\+[0-9A-F]{4,}$/);
@@ -1816,7 +1812,7 @@ describe('transform', () => {
     // Sorted by count desc: iteration of object keys preserves insertion order
     // in V8/JSC, so the first key is the highest-count drop.
     const keys = Object.keys(top);
-    expect(keys[0]).toBe('U+E0100');
+    expect(keys[0]).toBe('U+0003');
   });
 
   it('omits droppedCodepointsTop entirely when no drops occur', async () => {
@@ -1833,15 +1829,18 @@ describe('transform', () => {
   });
 
   it('caps droppedCodepointsTop at 20 entries', async () => {
-    // 25 distinct escape-exempt codepoints (plane-14 variation selectors —
-    // astral, so guaranteed atlas misses; exempt, so guaranteed drops rather
-    // than [U+HEX] escapes), each appearing N times so we can verify the cap
-    // drops the smallest counts.
+    // 25 distinct escape-exempt C0 control codepoints (excluding \t 0x09 and \n 0x0A
+    // which are expanded/split before rendering), each appearing N times so we
+    // can verify the cap drops the smallest counts.
+    const c0Cps: number[] = [];
+    for (let cp = 1; cp < 32; cp++) {
+      if (cp !== 9 && cp !== 10) c0Cps.push(cp);
+    }
+    const testCps = c0Cps.slice(0, 25);
+
     let payload = 'x'.repeat(150000) + '\n';
     for (let i = 0; i < 25; i++) {
-      // U+E0100..U+E0118 — 25 distinct codepoints, each occurring (25 - i) times
-      // so U+E0100 occurs 25 times, U+E0118 occurs 1 time.
-      payload += String.fromCodePoint(0xe0100 + i).repeat(25 - i);
+      payload += String.fromCharCode(testCps[i]!).repeat(25 - i);
     }
     const req = JSON.stringify({
       model: 'claude-3-5-sonnet',
@@ -1855,11 +1854,12 @@ describe('transform', () => {
     // The 5 smallest-count codepoints (last in the input) must be dropped
     // from the top-20.
     for (let i = 20; i < 25; i++) {
-      const hex = (0xe0100 + i).toString(16).toUpperCase().padStart(4, '0');
+      const hex = testCps[i]!.toString(16).toUpperCase().padStart(4, '0');
       expect(top[`U+${hex}`]).toBeUndefined();
     }
     // The top entry is the most-frequent.
-    expect(top['U+E0100']).toBe(25);
+    const topHex = testCps[0]!.toString(16).toUpperCase().padStart(4, '0');
+    expect(top[`U+${topHex}`]).toBe(25);
   });
 
   // --- Per-block break-even gate (URGENT slice, supersedes prior threshold tests) ---

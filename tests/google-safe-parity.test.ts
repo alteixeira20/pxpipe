@@ -48,23 +48,11 @@ describe('Google reliability-profile parity', () => {
   });
 
   it('rejects archival history images when the renderer reports a dropped character', async () => {
-    const contents: Array<Record<string, unknown>> = [
-      { role: 'user', parts: [{ text: 'LIVE TASK: keep exact state.' }] },
-    ];
+    const contents: Array<Record<string, unknown>> = [];
     for (let index = 0; index < 24; index += 1) {
-      contents.push({
-        role: 'model',
-        parts: [{ functionCall: { name: 'read', args: { filePath: `/tmp/file-${index}.ts` } } }],
-      });
-      contents.push({
-        role: 'user',
-        parts: [{ functionResponse: {
-          name: 'read',
-          response: {
-            content: `${index === 0 ? '\ufe0f' : ''} result-${index} `.repeat(220),
-          },
-        } }],
-      });
+      const marker = index === 2 ? '\u0003' : '';
+      const text = `turn-${index} ${marker} ` + 'archival context '.repeat(500);
+      contents.push({ role: index % 2 === 0 ? 'user' : 'model', parts: [{ text }] });
     }
     const request = { contents };
     const raw = JSON.stringify(request);

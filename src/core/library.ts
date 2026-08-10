@@ -225,7 +225,7 @@ export async function renderTextToImages(
 
   // Measure the content width. Reflowed source is one joined full-width line, so this is
   // byte-identical to the proxy's history render.
-  const cols = opts.shrink === false ? maxCols : measureContentCols(source, maxCols);
+  const cols = opts.shrink === false ? maxCols : measureContentCols(source, maxCols, 1, style.font, style.aa);
   const imgs = await renderTextToPngsWithCharLimit(source, cols, maxChars, style, maxHeightPx);
 
   let droppedChars = 0;

@@ -509,32 +509,62 @@ export function dereflow(reflowed: string): string {
 export const GLYPH_ESCAPE_OPEN = '[U+';
 export const GLYPH_ESCAPE_CLOSE = ']';
 
-/** Codepoints that stay DROPPED (blank cell) rather than escaped. Escaping these
- *  would add noise, not information — they're modifiers/invisibles, not content.
- *  C0 additionally MUST keep width-1: the parallel slot string carries \x01/\x02
- *  role markers and \x03 neutral (see SLOT_MARK_*), and escaping them would
- *  desync slot/text alignment and smear role hues. */
-function isEscapeExempt(cp: number): boolean {
-  if (cp < 0x20) return true; // C0 controls (slot markers; \t is expanded before we run)
-  if (cp >= 0x7f && cp <= 0x9f) return true; // DEL + C1 controls
-  if (cp >= 0x0300 && cp <= 0x036f) return true; // combining diacritics
-  if (cp === 0x200b || cp === 0x200c || cp === 0x200d || cp === 0x2060 || cp === 0xfeff)
-    return true; // zero-width / word-joiner / BOM
-  if (cp >= 0xfe00 && cp <= 0xfe0f) return true; // variation selectors (emoji presentation)
-  if (cp >= 0xe0100 && cp <= 0xe01ef) return true; // variation selectors supplement
-  return false;
+export function hasGlyph(
+  codepoint: number,
+  font: RenderFont = DEFAULT_RENDER_FONT,
+  aa?: boolean,
+): boolean {
+  if (aa) {
+    return grayGlyph(codepoint, font) !== null;
+  }
+  return bitGlyph(codepoint, font) !== null;
 }
 
-/** Replace atlas-missing codepoints with `[U+HEX]` (uppercase hex — e.g.
- *  🔥 → `[U+1F525]`). Lossless for non-exempt misses (hex → codepoint) and
- *  idempotent: the escape spells only atlas-present chars, so a second pass is
- *  a no-op. Fast path allocates nothing when every codepoint is in the atlas. */
-export function escapeMissingGlyphs(line: string): string {
+/**
+ * Codepoints exempt from atlas-miss escaping ([U+HEX]).
+ * C0 control characters (0x01–0x1F) — including internal renderer slot markers
+ * (SLOT_MARK_USER, SLOT_MARK_ASSISTANT, SLOT_NEUTRAL) — MUST stay unescaped to preserve
+ * 1:1 character positional alignment between text and parallel slot strings for role coloring.
+ * All source-content Unicode (variation selectors, ZWJ, combining marks, zero-width/BOM/
+ * word-joiner codepoints, C1 controls, and missing visible Unicode) is escaped
+ * deterministically to ASCII [U+HEX].
+ */
+function isEscapeExempt(cp: number): boolean {
+  return cp >= 0x0001 && cp < 0x0020;
+}
+
+/**
+ * Replace atlas-missing codepoints with `[U+HEX]` (uppercase hex — e.g.
+ * 🔥 → `[U+1F525]`, U+FE0F → `[U+FE0F]`).
+ *
+ * Source-content Unicode that the atlas cannot draw (including variation selectors,
+ * ZWJ, combining marks, zero-width/BOM/word-joiner codepoints, and missing visible
+ * Unicode) is escaped deterministically to ASCII [U+HEX], allowing original
+ * codepoints to be recovered and reporting zero dropped chars (droppedChars === 0).
+ *
+ * Internal renderer slot markers (C0 controls 0x01–0x03) remain exempt from escaping
+ * to keep slot-string positional alignment intact for role coloring.
+ *
+ * Respects the selected render font and AA companion atlas for glyph availability checks.
+ */
+export function escapeMissingGlyphs(
+  line: string,
+  font?: RenderFont | RenderStyle,
+  aa?: boolean,
+): string {
+  let renderFont: RenderFont = DEFAULT_RENDER_FONT;
+  let useAA: boolean | undefined = aa;
+  if (typeof font === 'object' && font !== null) {
+    useAA = font.aa;
+    renderFont = font.font ?? DEFAULT_RENDER_FONT;
+  } else if (typeof font === 'string') {
+    renderFont = font;
+  }
   let out: string | null = null; // lazily materialized on first miss
   let i = 0;
   for (const ch of line) {
     const cp = ch.codePointAt(0)!;
-    if (atlasRank(cp) < 0 && !isEscapeExempt(cp)) {
+    if (!hasGlyph(cp, renderFont, useAA) && !isEscapeExempt(cp)) {
       if (out === null) out = line.slice(0, i);
       out += GLYPH_ESCAPE_OPEN + cp.toString(16).toUpperCase() + GLYPH_ESCAPE_CLOSE;
     } else if (out !== null) {
@@ -606,13 +636,14 @@ export function measureContentCols(
   maxCols: number,
   markerScale: number = 1,
   font: RenderFont = DEFAULT_RENDER_FONT,
+  aa?: boolean,
 ): number {
   const cap = Math.max(1, maxCols | 0);
   let widest = 1;
   let start = 0;
   for (let i = 0; i <= text.length; i++) {
     if (i === text.length || text[i] === '\n') {
-      const w = measureLineCols(escapeMissingGlyphs(expandTabsInLine(text.slice(start, i))), markerScale, font);
+      const w = measureLineCols(escapeMissingGlyphs(expandTabsInLine(text.slice(start, i)), font, aa), markerScale, font);
       if (w > widest) widest = w;
       if (widest >= cap) return cap;
       start = i + 1;
@@ -626,11 +657,12 @@ export function wrapLines(
   cols: number,
   markerScale: number = 1,
   font: RenderFont = DEFAULT_RENDER_FONT,
+  aa?: boolean,
 ): string[] {
   const out: string[] = [];
   const minified = minifyForRender(text);
   for (const rawWithTabs of minified.split('\n')) {
-    const raw = escapeMissingGlyphs(expandTabsInLine(rawWithTabs));
+    const raw = escapeMissingGlyphs(expandTabsInLine(rawWithTabs), font, aa);
     if (raw.length === 0) {
       out.push('');
       continue;
@@ -891,13 +923,13 @@ export async function renderChunkToPng(
   const markerScale = Math.max(1, Math.floor(style.markerScale ?? 1));
   const cellH = renderCellHeight(style);
   const cellW = renderCellWidth(style);
-  const lines = wrapLines(text, cols, markerScale, style.font);
+  const lines = wrapLines(text, cols, markerScale, style.font, style.aa);
   // Slot string carries role attribution by position. It is width-identical to
   // `text`, so wrapLines splits it into the exact same rows — fitSlotLines[r] aligns
   // codepoint-for-codepoint with fitLines[r]. Only built when coloring is on.
   const slotLines: string[] | null =
     style.colorByRole === true && slotText !== undefined
-      ? wrapLines(slotText, cols, markerScale, style.font)
+      ? wrapLines(slotText, cols, markerScale, style.font, style.aa)
       : null;
 
   const maxLines = Math.max(1, Math.floor((maxHeightPx - 2 * PAD_Y) / cellH));
@@ -1089,12 +1121,12 @@ export async function renderTextToPngsWithCharLimit(
 ): Promise<RenderedImage[]> {
   const markerScale = Math.max(1, Math.floor(style.markerScale ?? 1));
   const cellH = renderCellHeight(style);
-  const lines = wrapLines(text, cols, markerScale, style.font);
+  const lines = wrapLines(text, cols, markerScale, style.font, style.aa);
   // Width-identical slot rows align 1:1 with `lines`; pages are contiguous slices,
   // so the same index range gives each page its slot half. Only built when coloring.
   const slotLines: string[] | null =
     style.colorByRole === true && slotText !== undefined
-      ? wrapLines(slotText, cols, markerScale, style.font)
+      ? wrapLines(slotText, cols, markerScale, style.font, style.aa)
       : null;
   const hardLinesPerImg = Math.max(1, Math.floor((maxHeightPx - 2 * PAD_Y) / cellH));
   // Dense pages (DENSE_CONTENT_CHARS_PER_IMAGE) fill the full 1932 px height;
@@ -1163,8 +1195,8 @@ export async function renderDensePages(
 ): Promise<RenderedImage[]> {
   const source = opts.reflow ? reflow(text) ?? text : text;
   const maxCols = Math.max(1, (opts.cols ?? DENSE_CONTENT_COLS) | 0);
-  const cols = opts.shrink === false ? maxCols : measureContentCols(source, maxCols);
   const style = opts.style ?? DENSE_RENDER_STYLE;
+  const cols = opts.shrink === false ? maxCols : measureContentCols(source, maxCols, 1, style.font, style.aa);
   const maxChars = opts.maxCharsPerImage ?? DENSE_CONTENT_CHARS_PER_IMAGE;
   const maxHeightPx = opts.maxHeightPx ?? MAX_HEIGHT_PX;
   return renderTextToPngsWithCharLimit(source, cols, maxChars, style, maxHeightPx);
