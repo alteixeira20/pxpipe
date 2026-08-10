@@ -28,6 +28,7 @@ export interface CodexEconomicsReport {
   requests: number;
   usageRequests: number;
   transformedRequests: number;
+  transformsWithoutUsage: number;
   passthroughBaselineRequests: number;
   /** Provider-reported actual input/output usage. */
   providerInputTokens: number;
@@ -35,9 +36,11 @@ export interface CodexEconomicsReport {
   cachedTokens: number;
   cacheSharePct: number;
   /** Reconstructed all-request raw text counterfactual: actual provider input
-   * plus the exact text→image/native delta on transformed rows. */
+   * plus the exact text→image/native delta on usage-complete transformed rows. */
   rawBaselineProviderInput: number;
   rawSavedPct: number;
+  /** Transform counters below deliberately include only rows with authoritative
+   * provider usage so they share the same population as providerInputTokens. */
   baselineImagedTokens: number;
   imageTokens: number;
   nativeInjectedTokens: number;
@@ -49,6 +52,8 @@ export interface CodexEconomicsReport {
   effectiveSavedPct: number;
   transformedEffectiveSavedInput: number;
   transformedEffectiveSavedPct: number;
+  /** Safety/profitability diagnostics can be evaluated without usage and thus
+   * cover every transformed request. */
   netNegativeTransforms: number;
   lowMarginTransforms: number;
   safetyFlagged: number;
@@ -182,6 +187,7 @@ export function buildCodexEconomicsReport(
   const passthroughEvents = events.filter((event) => event.provider === 'codex-passthrough');
 
   let usageRequests = 0;
+  let transformsWithoutUsage = 0;
   let providerInputTokens = 0;
   let providerOutputTokens = 0;
   let cachedTokens = 0;
@@ -221,13 +227,22 @@ export function buildCodexEconomicsReport(
     const injected = isFiniteNumber(event.native_injected_tokens)
       ? Math.max(0, event.native_injected_tokens)
       : 0;
-    baselineImagedTokens += baseline;
-    imageTokens += image;
-    nativeInjectedTokens += injected;
     const net = baseline - image - injected;
     if (baseline > 0 && net <= 0) netNegativeTransforms += 1;
     if (baseline > 0 && net > 0 && net / baseline < 0.05) lowMarginTransforms += 1;
-    if (eff.haveUsage && eff.haveCounterfactual) {
+
+    // A transform delta is known locally even when a stream ended before the
+    // terminal usage block, but combining that delta with a provider-input sum
+    // that excludes the request would fabricate a percentage. Keep the row in
+    // reliability diagnostics while excluding it from provider-grounded totals.
+    if (!usage.haveUsage) {
+      transformsWithoutUsage += 1;
+      continue;
+    }
+    baselineImagedTokens += baseline;
+    imageTokens += image;
+    nativeInjectedTokens += injected;
+    if (eff.haveCounterfactual) {
       transformedActual += eff.actual;
       transformedBaseline += eff.baseline;
     }
@@ -236,9 +251,10 @@ export function buildCodexEconomicsReport(
   const grossRawSavedTokens = baselineImagedTokens - imageTokens;
   const netRawSavedTokens = grossRawSavedTokens - nativeInjectedTokens;
   // Unlike the cache-weighted effective view, this raw provider-token view says
-  // exactly how much input the request shrank on the wire. That distinction is
-  // essential for ChatGPT subscriptions: PXPipe can measure both quantities but
-  // must not claim which one an opaque subscription quota meter uses.
+  // how much usage-complete provider input the request population shrank on the
+  // wire. That distinction is essential for ChatGPT subscriptions: PXPipe can
+  // measure both quantities but must not claim which one an opaque subscription
+  // quota meter uses.
   const rawBaselineProviderInput = Math.max(0, providerInputTokens + netRawSavedTokens);
   const rawSavedPct = rawBaselineProviderInput > 0
     ? (netRawSavedTokens / rawBaselineProviderInput) * 100
@@ -264,21 +280,25 @@ export function buildCodexEconomicsReport(
     : null;
 
   let verdict: CodexEconomicsVerdict;
-  if (usageRequests === 0 || transformedEvents.length === 0) verdict = 'insufficient-data';
+  if (usageRequests === 0 || transformed.usageRequests === 0) verdict = 'insufficient-data';
   else if (netNegativeTransforms > 0 || effectiveSavedPct < 0) verdict = 'regression';
   else if (effectiveSavedPct < 1) verdict = 'marginal';
   else if (effectiveSavedPct < 5) verdict = 'modest';
   else verdict = 'material';
 
+  const usageCaveat = transformsWithoutUsage > 0
+    ? ` ${transformsWithoutUsage} transformed request(s) lacked terminal provider usage and are excluded from token percentages.`
+    : '';
   const note = !abReady
-    ? `Token counterfactual is available, but a controlled routed A/B needs at least ${CODEX_AB_MIN_PER_ARM} usage-complete transformed and ${CODEX_AB_MIN_PER_ARM} passthrough requests. Run comparable tasks with pxpipe codex and pxpipe codex --passthrough.`
-    : 'A/B cohorts are large enough for a first observed comparison, but the compression gate creates selection bias. Compare similar tasks and use the provider-grounded counterfactual as the primary token-economics measure.';
+    ? `Token counterfactual is available, but a controlled routed A/B needs at least ${CODEX_AB_MIN_PER_ARM} usage-complete transformed and ${CODEX_AB_MIN_PER_ARM} passthrough requests. Run comparable tasks with pxpipe codex and pxpipe codex --passthrough.${usageCaveat}`
+    : `A/B cohorts are large enough for a first observed comparison, but the compression gate creates selection bias. Compare similar tasks and use the provider-grounded counterfactual as the primary token-economics measure.${usageCaveat}`;
 
   return {
     model: model ?? events.find((event) => event.model)?.model ?? null,
     requests: events.length,
     usageRequests,
     transformedRequests: transformedEvents.length,
+    transformsWithoutUsage,
     passthroughBaselineRequests: passthroughEvents.length,
     providerInputTokens,
     providerOutputTokens,
