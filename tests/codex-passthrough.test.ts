@@ -4,6 +4,7 @@ import {
   buildCodexConfigArgs,
   CODEX_MODEL_PROVIDER_ID,
   CODEX_PASSTHROUGH_HEADER,
+  CODEX_PASSTHROUGH_HEADER_VALUE,
   parseCodexInvocation,
 } from '../src/core/codex.js';
 import { createFailOpenProxy } from '../src/core/fail-open.js';
@@ -45,7 +46,7 @@ describe('Codex routed passthrough launch', () => {
     });
     const values = args.filter((_value, index) => index % 2 === 1);
     expect(values).toContain(
-      `model_providers.${CODEX_MODEL_PROVIDER_ID}.http_headers={ ${CODEX_PASSTHROUGH_HEADER} = "off" }`,
+      `model_providers.${CODEX_MODEL_PROVIDER_ID}.http_headers={ ${CODEX_PASSTHROUGH_HEADER} = "${CODEX_PASSTHROUGH_HEADER_VALUE}" }`,
     );
     expect(values).toContain(`model_provider=${CODEX_MODEL_PROVIDER_ID}`);
   });
@@ -84,7 +85,7 @@ describe('PXPipe per-process compression control', () => {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        [CODEX_PASSTHROUGH_HEADER]: 'off',
+        [CODEX_PASSTHROUGH_HEADER]: CODEX_PASSTHROUGH_HEADER_VALUE,
       },
       body,
     }));
@@ -94,10 +95,13 @@ describe('PXPipe per-process compression control', () => {
     expect(upstream).toHaveLength(1);
     expect(upstream[0]!.headers.get(CODEX_PASSTHROUGH_HEADER)).toBeNull();
     expect(await upstream[0]!.text()).toBe(body);
+    expect(event?.provider).toBe('codex-passthrough');
     expect(event?.accountingProvider).toBe('openai');
     expect(event?.model).toBe('gpt-5.6-sol');
     expect(event?.info?.compressed).toBe(false);
-    expect(event?.info?.reason).toBe('compress=false');
+    // Reason is deliberately NOT the A/B identity: applicability may have
+    // already declined the model in a test/older daemon. Provider identity is
+    // explicit and stable regardless of that ambient policy.
     expect(event?.usage?.input_tokens).toBe(1234);
     expect(event?.usage?.cached_tokens).toBe(1000);
     expect(event?.usage?.output_tokens).toBe(12);
