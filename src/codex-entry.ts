@@ -276,6 +276,12 @@ async function runCodexReport(args: readonly string[]): Promise<void> {
   console.log(`  prompt-cache hits:   ${fmt(report.cachedTokens)} tok (${pct(report.cacheSharePct)})`);
   console.log(`  provider output:     ${fmt(report.providerOutputTokens)} tok (never compressed)`);
   console.log('');
+  console.log('Raw provider-input view');
+  console.log(`  actual input:        ${fmt(report.providerInputTokens)} tok`);
+  console.log(`  text counterfactual: ${fmt(report.rawBaselineProviderInput)} tok`);
+  console.log(`  raw reduction:       ${fmt(report.netRawSavedTokens)} tok (${pct(report.rawSavedPct)})`);
+  console.log('  This is literal provider input shrink before prompt-cache price weighting.');
+  console.log('');
   console.log('Transformation economics');
   console.log(`  text replaced:       ${fmt(report.baselineImagedTokens)} tok`);
   console.log(`  image cost:          ${fmt(report.imageTokens)} tok`);
@@ -296,8 +302,9 @@ async function runCodexReport(args: readonly string[]): Promise<void> {
     console.log(`  observed input delta:${report.observedCohortDeltaPct >= 0 ? ' +' : ' '}${pct(report.observedCohortDeltaPct)} compressed vs passthrough`);
   }
   console.log('');
-  console.log(`Verdict: ${report.verdict}`);
+  console.log(`Cache-weighted verdict: ${report.verdict}`);
   console.log(`  ${report.note}`);
+  console.log('  Raw provider-input reduction and cache-weighted economics are deliberately separate. PXPipe does not assume which one an opaque ChatGPT subscription quota meter uses.');
   console.log('  Dollar savings are intentionally omitted for ChatGPT-authenticated Codex: subscription usage is not a per-token API invoice.');
   if (report.safetyFlagged > 0 || report.abnormalStreamTerminations > 0) {
     console.log(`  reliability flags: ${report.safetyFlagged} safety-classified, ${report.abnormalStreamTerminations} abnormal stream terminations`);
