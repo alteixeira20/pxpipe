@@ -42,6 +42,7 @@ import {
   type DashboardRoute,
 } from './dashboard.js';
 import { setPxpipeVersion } from './core/featherless.js';
+import { CODEX_PROVIDER_ID, DEFAULT_CODEX_UPSTREAM } from './core/codex.js';
 import { resolveCompressionProfile } from './core/safety-policy.js';
 
 /** Runtime config. The core transform tuning comes from DEFAULTS in
@@ -59,6 +60,9 @@ interface RuntimeConfig {
   featherlessUpstream: string;
   featherlessApiKey?: string;
   googleUpstream: string;
+  /** Where the Codex provider route forwards. ChatGPT-auth Codex by default;
+   *  override for API-key deployments. */
+  codexUpstream: string;
   /** Independent Cloudflare OpenAI-compatible endpoint. */
   cloudflareUpstream?: string;
   cloudflareApiKey?: string;
@@ -189,6 +193,7 @@ function parseCli(argv: string[]): RuntimeConfig {
     featherlessApiKey: process.env.FEATHERLESS_API_KEY
       ?? (process.env.PXPIPE_PROVIDER === 'featherless' ? process.env.OPENAI_API_KEY : undefined),
     googleUpstream: process.env.GOOGLE_UPSTREAM ?? 'https://generativelanguage.googleapis.com',
+    codexUpstream: process.env.PXPIPE_CODEX_UPSTREAM ?? DEFAULT_CODEX_UPSTREAM,
     cloudflareUpstream,
     cloudflareApiKey: cfToken,
     openAIModels: parseModels(process.env.OPENAI_MODELS),
@@ -227,6 +232,17 @@ function printHelp(): void {
 Usage:
   pxpipe                run the proxy (no flags)
   pxpipe export [...]   render files/diff to PNG pages + cost report (see pxpipe export --help)
+  pxpipe codex [--binary NAME] [--direct] [codex args...]
+                        run Codex CLI through the persistent proxy. Reuses the
+                        listener already on PORT — it never binds one — and
+                        pins Codex to its HTTPS Responses transport. Codex
+                        auth and CODEX_HOME are untouched, so an alternate
+                        executable keeps its own account:
+                          pxpipe codex
+                          pxpipe codex --binary codex-ar
+  pxpipe doctor codex [--json]
+                        report Codex readiness: executable, persistent
+                        listener, inference route, CA, profile
   pxpipe warp [--route PATTERN=TARGET]... -- CMD
                         run CMD behind the proxy without a custom base URL, so
                         client-side first-party gates (/remote-control,
@@ -257,6 +273,9 @@ Environment:
                            (default https://api.anthropic.com)
   OPENAI_UPSTREAM         OpenAI API base; overrides PXPIPE_UPSTREAM
                            (default https://api.openai.com)
+  PXPIPE_CODEX_UPSTREAM   upstream for the Codex provider route
+                           (default https://chatgpt.com/backend-api/codex)
+  PXPIPE_CODEX_BINARY     default executable for \`pxpipe codex\` (default codex)
   OPENAI_API_KEY          optional OpenAI key override; otherwise forwarded
   OPENAI_MODELS           comma-separated exact model ids routed to OpenAI
                           Responses
@@ -1357,6 +1376,26 @@ async function main(): Promise<void> {
         },
       },
       {
+        // Codex CLI. The wire is OpenAI Responses, but the upstream is the
+        // ChatGPT backend rather than api.openai.com, and the caller's own
+        // ChatGPT bearer rides through untouched: no key is configured here, so
+        // the proxy forwards the client's Authorization header unchanged.
+        id: CODEX_PROVIDER_ID,
+        protocol: 'openai',
+        proxy: {
+          ...config,
+          provider: undefined,
+          gatewayBaseUrl: undefined,
+          gatewayHeaders: {},
+          upstream: opts.codexUpstream,
+          apiKey: undefined,
+          authToken: undefined,
+          openAIApiKey: undefined,
+          openAIModels: [],
+          cloudflareModels: [],
+        },
+      },
+      {
         id: 'featherless',
         protocol: 'openai',
         proxy: {
@@ -1489,6 +1528,23 @@ async function main(): Promise<void> {
             return;
           }
         }
+        // Readiness introspection for `pxpipe doctor codex` and friends: which
+        // provider routes this listener actually serves. Loopback-only and
+        // metadata-only — no upstream, no credentials, no request contents.
+        if (req.method === 'GET' && url.pathname === '/proxy-routes') {
+          if (!isLoopbackAddress(req.socket.remoteAddress) || !isLoopbackHostname(url.hostname)) {
+            await writeWebResponse(new Response('proxy-routes is loopback-only', { status: 403 }), res);
+            return;
+          }
+          await writeWebResponse(
+            Response.json({
+              profile: compressionProfile.name,
+              providers: providerRouter.inspect().providers,
+            }),
+            res,
+          );
+          return;
+        }
         const webReq = toWebRequest(req);
         const webRes = await handle(webReq);
         await writeWebResponse(webRes, res);
@@ -1515,6 +1571,7 @@ async function main(): Promise<void> {
     console.log(`[pxpipe] openai upstream → ${routes.openai}`);
     console.log(`[pxpipe] featherless provider route → ${opts.featherlessUpstream}`);
     console.log(`[pxpipe] google provider route → ${opts.googleUpstream}`);
+    console.log(`[pxpipe] codex provider route → ${opts.codexUpstream}`);
     console.log(
       `[pxpipe] provider routes → ${providerRouter.inspect().providers.map((provider) => provider.prefix).join(', ')}`,
     );
