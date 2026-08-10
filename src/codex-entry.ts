@@ -19,6 +19,10 @@ import {
   type CodexInvocation,
 } from './core/codex.js';
 import {
+  buildCodexEconomicsReport,
+  loadRecentTrackEvents,
+} from './core/codex-economics.js';
+import {
   resolveCodexModelSelection,
   type CodexModelSelection,
 } from './core/codex-model.js';
@@ -198,8 +202,110 @@ async function runCodexDoctor(args: readonly string[]): Promise<void> {
   process.exitCode = report.ok ? 0 : 1;
 }
 
+function parseReportArgs(args: readonly string[]): { json: boolean; model?: string } {
+  let json = false;
+  let model: string | undefined;
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i]!;
+    if (arg === '--json') {
+      json = true;
+      continue;
+    }
+    if (arg === '--model') {
+      const value = args[i + 1];
+      if (!value || value.startsWith('-')) throw new Error('--model requires a model id');
+      model = value;
+      i += 1;
+      continue;
+    }
+    if (arg.startsWith('--model=')) {
+      model = arg.slice('--model='.length);
+      if (!model) throw new Error('--model requires a model id');
+      continue;
+    }
+    throw new Error(`unknown report option: ${arg}`);
+  }
+  return { json, ...(model ? { model } : {}) };
+}
+
+function fmt(n: number): string {
+  return Math.round(n).toLocaleString('en-US');
+}
+
+function pct(n: number): string {
+  const a = Math.abs(n);
+  const digits = a < 1 ? 3 : a < 10 ? 2 : 1;
+  return `${n.toFixed(digits)}%`;
+}
+
+function maybeNum(n: number | null, suffix = ''): string {
+  return n === null ? 'n/a' : `${Math.round(n).toLocaleString('en-US')}${suffix}`;
+}
+
+async function runCodexReport(args: readonly string[]): Promise<void> {
+  let options;
+  try {
+    options = parseReportArgs(args);
+  } catch (error) {
+    console.error(`[pxpipe] codex report: ${(error as Error).message}`);
+    process.exitCode = 2;
+    return;
+  }
+  const eventsFile = process.env.PXPIPE_LOG?.trim()
+    || join(homedir(), '.pxpipe', 'events.jsonl');
+  let events;
+  try {
+    events = loadRecentTrackEvents(eventsFile);
+  } catch (error) {
+    console.error(`[pxpipe] codex report: cannot read ${eventsFile}: ${(error as Error).message}`);
+    process.exitCode = 1;
+    return;
+  }
+  const report = buildCodexEconomicsReport(events, options.model);
+  if (options.json) {
+    process.stdout.write(`${JSON.stringify({ eventsFile, ...report })}\n`);
+    return;
+  }
+
+  console.log(`Codex token economics — ${report.model ?? options.model ?? 'all Codex models'}`);
+  console.log(`  source:              ${eventsFile} (bounded recent tail)`);
+  console.log(`  inference requests:  ${report.requests} (${report.usageRequests} with authoritative usage)`);
+  console.log(`  transformed:         ${report.transformedRequests}`);
+  console.log(`  passthrough A/B arm: ${report.passthroughBaselineRequests}`);
+  console.log(`  provider input:      ${fmt(report.providerInputTokens)} tok`);
+  console.log(`  prompt-cache hits:   ${fmt(report.cachedTokens)} tok (${pct(report.cacheSharePct)})`);
+  console.log(`  provider output:     ${fmt(report.providerOutputTokens)} tok (never compressed)`);
+  console.log('');
+  console.log('Transformation economics');
+  console.log(`  text replaced:       ${fmt(report.baselineImagedTokens)} tok`);
+  console.log(`  image cost:          ${fmt(report.imageTokens)} tok`);
+  console.log(`  pxpipe native text:  ${fmt(report.nativeInjectedTokens)} tok`);
+  console.log(`  gross raw saving:    ${fmt(report.grossRawSavedTokens)} tok`);
+  console.log(`  net raw saving:      ${fmt(report.netRawSavedTokens)} tok`);
+  console.log(`  effective input:     ${fmt(report.effectiveActualInput)} vs ${fmt(report.effectiveBaselineInput)} text-equivalent`);
+  console.log(`  effective saving:    ${fmt(report.effectiveSavedInput)} tok (${pct(report.effectiveSavedPct)})`);
+  console.log(`  transformed-only:    ${fmt(report.transformedEffectiveSavedInput)} tok (${pct(report.transformedEffectiveSavedPct)})`);
+  console.log(`  negative transforms: ${report.netNegativeTransforms}`);
+  console.log(`  <5% raw-margin:      ${report.lowMarginTransforms}`);
+  console.log('');
+  console.log('Observed routed cohorts (not a randomized experiment)');
+  console.log(`  compressed:          n=${report.transformed.usageRequests}, avg effective input=${maybeNum(report.transformed.avgEffectiveInput)}, p50=${maybeNum(report.transformed.p50DurationMs, 'ms')}`);
+  console.log(`  passthrough:         n=${report.passthrough.usageRequests}, avg effective input=${maybeNum(report.passthrough.avgEffectiveInput)}, p50=${maybeNum(report.passthrough.p50DurationMs, 'ms')}`);
+  console.log(`  A/B sample ready:    ${report.abReady ? 'yes' : `no (need ${report.abMinPerArm} usage-complete requests per arm)`}`);
+  if (report.observedCohortDeltaPct !== null) {
+    console.log(`  observed input delta:${report.observedCohortDeltaPct >= 0 ? ' +' : ' '}${pct(report.observedCohortDeltaPct)} compressed vs passthrough`);
+  }
+  console.log('');
+  console.log(`Verdict: ${report.verdict}`);
+  console.log(`  ${report.note}`);
+  console.log('  Dollar savings are intentionally omitted for ChatGPT-authenticated Codex: subscription usage is not a per-token API invoice.');
+  if (report.safetyFlagged > 0 || report.abnormalStreamTerminations > 0) {
+    console.log(`  reliability flags: ${report.safetyFlagged} safety-classified, ${report.abnormalStreamTerminations} abnormal stream terminations`);
+  }
+}
+
 /**
- * `pxpipe codex` / `pxpipe doctor codex`.
+ * `pxpipe codex` / `pxpipe doctor codex` / `pxpipe codex report`.
  *
  * The persistent listener is reused, never rebound; if it is not running the
  * launch still succeeds, loudly, in direct mode, because a developer must not
@@ -208,6 +314,10 @@ async function runCodexDoctor(args: readonly string[]): Promise<void> {
 export async function runCodexEntry(argv: readonly string[]): Promise<void> {
   if (argv[0] === 'doctor' && argv[1] === 'codex') {
     await runCodexDoctor(argv.slice(2));
+    return;
+  }
+  if (argv[0] === 'codex' && argv[1] === 'report') {
+    await runCodexReport(argv.slice(2));
     return;
   }
 
@@ -260,9 +370,13 @@ export async function runCodexEntry(argv: readonly string[]): Promise<void> {
     route.allowedModelBases,
   );
   console.error(`[pxpipe] codex → ${persistent.baseUrl} (HTTPS Responses, persistent listener reused)`);
-  console.error(compression.compresses
-    ? `[pxpipe] codex compression ACTIVE → ${model.model} / ${compression.profile}`
-    : `[pxpipe] codex compression INACTIVE → ${model.model} is outside ${compression.profile}; routing/accounting remain active`);
+  if (invocation.passthrough) {
+    console.error('[pxpipe] codex A/B baseline → compression OFF for this process; routing, ChatGPT auth and accounting remain active');
+  } else {
+    console.error(compression.compresses
+      ? `[pxpipe] codex compression ACTIVE → ${model.model} / ${compression.profile}`
+      : `[pxpipe] codex compression INACTIVE → ${model.model} is outside ${compression.profile}; routing/accounting remain active`);
+  }
 
   // Pin only a model that came from persistent user configuration/profile. An
   // explicit CLI model already has higher precedence, while the diagnostic
@@ -272,7 +386,12 @@ export async function runCodexEntry(argv: readonly string[]): Promise<void> {
     : undefined;
   spawnTransparent(
     binary,
-    buildCodexCommandArgs(persistent.baseUrl, invocation.args, routedModel),
+    buildCodexCommandArgs(
+      persistent.baseUrl,
+      invocation.args,
+      routedModel,
+      { passthrough: invocation.passthrough === true },
+    ),
     env,
   );
 }
