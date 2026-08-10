@@ -63,13 +63,19 @@ function isFiniteNumber(value: unknown): value is number {
 
 function isCodexResponseEvent(event: TrackEvent, model?: string): boolean {
   if (model && event.model !== model) return false;
-  if (event.provider === 'codex') return /\/responses$/.test(event.path);
-  // Backward-compatible fallback for old logs written before the explicit
-  // provider id was persisted. Require OpenAI accounting + the Codex route
-  // shape so unrelated OpenAI-compatible traffic is not folded in casually.
-  return event.accounting_provider === 'openai'
-    && /\/responses$/.test(event.path)
-    && (!model || event.model === model);
+  const responses = /\/responses$/.test(event.path);
+  // New logs are provider-explicit. Once an event has an identity, never fold a
+  // generic OpenAI row into Codex merely because it shares the Responses wire.
+  if (event.provider) {
+    return responses && (event.provider === 'codex' || event.provider === 'codex-passthrough');
+  }
+  // Backward-compatible fallback only for old rows written before provider ids
+  // were persisted. A model filter is required to avoid swallowing unrelated
+  // OpenAI-compatible Responses traffic from the historical log.
+  return Boolean(model)
+    && event.accounting_provider === 'openai'
+    && responses
+    && event.model === model;
 }
 
 function eventUsage(event: TrackEvent): {
@@ -165,7 +171,8 @@ export function buildCodexEconomicsReport(
   const events = source.filter((event) => isCodexResponseEvent(event, model));
   const transformedEvents = events.filter((event) => event.compressed === true);
   const passthroughEvents = events.filter((event) =>
-    event.compressed !== true && (event.reason === 'compress=false' || event.reason === 'compression_disabled'));
+    event.provider === 'codex-passthrough'
+    || (event.compressed !== true && (event.reason === 'compress=false' || event.reason === 'compression_disabled')));
 
   let usageRequests = 0;
   let providerInputTokens = 0;
