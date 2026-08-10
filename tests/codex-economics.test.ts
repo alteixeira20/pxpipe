@@ -48,6 +48,8 @@ describe('Codex economics report', () => {
     expect(report.cacheSharePct).toBe(90);
     expect(report.grossRawSavedTokens).toBe(400);
     expect(report.netRawSavedTokens).toBe(380);
+    expect(report.rawBaselineProviderInput).toBe(2380);
+    expect(report.rawSavedPct).toBeCloseTo(15.966, 3);
 
     // Per event: actual = 100 uncached + 900*0.1 = 190.
     // Compressed counterfactual adds (500 - 100 - 20)*0.1 = 38.
@@ -90,6 +92,8 @@ describe('Codex economics report', () => {
       native_injected_tokens: 20,
     })]);
     expect(report.netRawSavedTokens).toBe(-10);
+    expect(report.rawBaselineProviderInput).toBe(990);
+    expect(report.rawSavedPct).toBeLessThan(0);
     expect(report.netNegativeTransforms).toBe(1);
     expect(report.effectiveSavedInput).toBeLessThan(0);
     expect(report.verdict).toBe('regression');
