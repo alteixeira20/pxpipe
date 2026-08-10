@@ -5,6 +5,7 @@ import {
   buildCodexConfigArgs,
   buildCodexEnvironment,
   CODEX_MODEL_PROVIDER_ID,
+  CODEX_NATIVE_PROVIDER_NAME,
   CODEX_PROVIDER_ID,
   CODEX_REFERENCE_MODEL,
   codexCompressionGate,
@@ -41,6 +42,14 @@ describe('codex provider base url', () => {
     });
   });
 
+  it('routes native remote compaction through the same provider prefix', () => {
+    const compact = new URL(`${codexProviderBaseUrl(47821)}/responses/compact`);
+    expect(parseProviderRoute(compact.pathname)).toEqual({
+      providerId: CODEX_PROVIDER_ID,
+      upstreamPath: '/responses/compact',
+    });
+  });
+
   it('keeps the ChatGPT backend as the default upstream', () => {
     expect(DEFAULT_CODEX_UPSTREAM).toBe('https://chatgpt.com/backend-api/codex');
   });
@@ -50,10 +59,15 @@ describe('codex config overrides', () => {
   const args = buildCodexConfigArgs('http://127.0.0.1:47821/providers/codex');
   const pairs = args.filter((_value, index) => index % 2 === 1);
 
-  it('declares its own provider instead of overriding the reserved built-in id', () => {
+  it('uses a distinct config id while preserving Codex native OpenAI capability identity', () => {
     // Codex refuses `model_providers.openai`: "Built-in providers cannot be overridden".
+    // The custom id remains pxpipe, but the friendly name stays OpenAI because
+    // Codex uses that name as the capability signal for remote compaction.
     expect(pairs.some((pair) => pair.startsWith('model_providers.openai.'))).toBe(false);
-    expect(pairs).toContain(`model_providers.${CODEX_MODEL_PROVIDER_ID}.name=PXPipe`);
+    expect(pairs).toContain(
+      `model_providers.${CODEX_MODEL_PROVIDER_ID}.name=${CODEX_NATIVE_PROVIDER_NAME}`,
+    );
+    expect(CODEX_NATIVE_PROVIDER_NAME).toBe('OpenAI');
     expect(pairs).toContain(`model_provider=${CODEX_MODEL_PROVIDER_ID}`);
   });
 
