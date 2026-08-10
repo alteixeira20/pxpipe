@@ -153,6 +153,8 @@ export interface ProxyEvent {
   fallback_reason?: string;
   fallback_result?: 'success' | 'failed' | 'not_attempted';
   upstream_attempt_count?: number;
+  /** Non-secret classification of response stream completion / termination. */
+  streamTermination?: 'response_terminal' | 'client_aborted' | 'upstream_ended_without_usage';
   /** Privacy-preserving session trajectory counters; never contains tool input, paths or result text. */
   trajectory?: TrajectoryObservation;
 }
@@ -769,6 +771,11 @@ function readStopReasonFromJson(j: unknown): string | undefined {
   return undefined;
 }
 
+export type StreamTerminationReason =
+  | 'response_terminal'
+  | 'client_aborted'
+  | 'upstream_ended_without_usage';
+
 /**
  * Tee the response body to extract usage + output measurement without blocking the client.
  * Streams are scanned to EOF (final output_tokens is in message_delta; redacted_thinking
@@ -780,6 +787,7 @@ function teeForUsage(res: Response): {
   errorBodyPromise: Promise<string | undefined>;
   measurementPromise: Promise<OutputMeasurement | undefined>;
   stopReasonPromise: Promise<string | undefined>;
+  streamTerminationPromise: Promise<StreamTerminationReason | undefined>;
 } {
   // No body at all: nothing to extract on either path.
   if (!res.body) {
@@ -789,6 +797,7 @@ function teeForUsage(res: Response): {
       errorBodyPromise: Promise.resolve(undefined),
       measurementPromise: Promise.resolve(undefined),
       stopReasonPromise: Promise.resolve(undefined),
+      streamTerminationPromise: Promise.resolve(undefined),
     };
   }
   // 4xx: tee for the error body but skip usage scanning entirely.
@@ -825,6 +834,7 @@ function teeForUsage(res: Response): {
       errorBodyPromise,
       measurementPromise: Promise.resolve(undefined),
       stopReasonPromise: Promise.resolve(undefined),
+      streamTerminationPromise: Promise.resolve(undefined),
     };
   }
   // 5xx: skip both (the host already synthesizes an error message).
@@ -835,20 +845,23 @@ function teeForUsage(res: Response): {
       errorBodyPromise: Promise.resolve(undefined),
       measurementPromise: Promise.resolve(undefined),
       stopReasonPromise: Promise.resolve(undefined),
+      streamTerminationPromise: Promise.resolve(undefined),
     };
   }
   const ct = (res.headers.get('content-type') ?? '').toLowerCase();
   const [forClient, forUs] = res.body.tee();
 
-  // Single read loop resolves all three; exposed as separate promises for call-site readability.
+  // Single read loop resolves all four; exposed as separate promises for call-site readability.
   const scanResult = (async (): Promise<{
     usage: Usage | undefined;
     measurement: OutputMeasurement | undefined;
     stopReason: string | undefined;
+    streamTermination: StreamTerminationReason;
   }> => {
     const reader = forUs.getReader();
     const decoder = new TextDecoder();
     let buf = '';
+    let clientAborted = false;
 
     try {
       // A declared content-type is authoritative when it says something we
@@ -895,28 +908,48 @@ function teeForUsage(res: Response): {
           }
         };
         drainBuffered();
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buf += decoder.decode(value, { stream: true });
-          drainBuffered();
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buf += decoder.decode(value, { stream: true });
+            drainBuffered();
+          }
+        } catch {
+          clientAborted = true;
         }
         buf += decoder.decode();
         if (buf.trim().length > 0) processSseEvent(buf, m, state); // trailing partial event
-        return { usage: state.usage, measurement: m, stopReason: state.stopReason };
+        const streamTermination: StreamTerminationReason = clientAborted
+          ? 'client_aborted'
+          : (state.usage !== undefined || state.stopReason !== undefined)
+            ? 'response_terminal'
+            : 'upstream_ended_without_usage';
+        return { usage: state.usage, measurement: m, stopReason: state.stopReason, streamTermination };
       }
 
       if (mode === 'json') {
         // Buffer fully, capped at 4 MiB.
         const MAX = 4 * 1024 * 1024;
-        while (buf.length < MAX) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buf += decoder.decode(value, { stream: true });
+        try {
+          while (buf.length < MAX) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buf += decoder.decode(value, { stream: true });
+          }
+        } catch {
+          clientAborted = true;
         }
         try {
           const objects = parseJsonObjects(buf);
-          if (!objects) return { usage: undefined, measurement: undefined, stopReason: undefined };
+          if (!objects) {
+            return {
+              usage: undefined,
+              measurement: undefined,
+              stopReason: undefined,
+              streamTermination: clientAborted ? 'client_aborted' : 'upstream_ended_without_usage',
+            };
+          }
           let usage: Usage | undefined;
           let recognizedGoogle = false;
           const measurement: OutputMeasurement = {
@@ -935,17 +968,29 @@ function teeForUsage(res: Response): {
             }
           }
           const last = objects[objects.length - 1];
+          const finalStopReason = state.stopReason ?? readStopReasonFromJson(last);
+          const streamTermination: StreamTerminationReason = clientAborted
+            ? 'client_aborted'
+            : (usage !== undefined || finalStopReason !== undefined)
+              ? 'response_terminal'
+              : 'upstream_ended_without_usage';
           return {
             usage,
             measurement: recognizedGoogle ? measurement : measureFromMessageJson(last),
-            stopReason: state.stopReason ?? readStopReasonFromJson(last),
+            stopReason: finalStopReason,
+            streamTermination,
           };
         } catch {
-          return { usage: undefined, measurement: undefined, stopReason: undefined };
+          return {
+            usage: undefined,
+            measurement: undefined,
+            stopReason: undefined,
+            streamTermination: clientAborted ? 'client_aborted' : 'upstream_ended_without_usage',
+          };
         }
       }
     } catch {
-      /* tee released early (client abort) */
+      clientAborted = true;
     }
     // Unknown content-type: drain to release the tee buffer.
     try {
@@ -954,9 +999,14 @@ function teeForUsage(res: Response): {
         if (done) break;
       }
     } catch {
-      /* ignore */
+      clientAborted = true;
     }
-    return { usage: undefined, measurement: undefined, stopReason: undefined };
+    return {
+      usage: undefined,
+      measurement: undefined,
+      stopReason: undefined,
+      streamTermination: clientAborted ? 'client_aborted' : 'upstream_ended_without_usage',
+    };
   })();
 
   return {
@@ -969,6 +1019,7 @@ function teeForUsage(res: Response): {
     errorBodyPromise: Promise.resolve(undefined),
     measurementPromise: scanResult.then((s) => s.measurement),
     stopReasonPromise: scanResult.then((s) => s.stopReason),
+    streamTerminationPromise: scanResult.then((s) => s.streamTermination),
   };
 }
 
@@ -1232,6 +1283,7 @@ export function createProxy(config: ProxyConfig = {}) {
       errorBody?: string,
       measurement?: OutputMeasurement,
       stopReason?: string,
+      streamTermination?: StreamTerminationReason,
     ): void => {
       const is4xx = status >= 400 && status < 500;
       // Gzip body lazily (only on 4xx). Async IIFE keeps fire() synchronous.
@@ -1311,6 +1363,7 @@ export function createProxy(config: ProxyConfig = {}) {
           reqBodyGz,
           measurement,
           stopReason,
+          streamTermination,
           provider: config.provider ?? (isGoogleRoute ? 'google' : isOpenAIChat || isOpenAIResponses ? 'openai' : 'anthropic'),
           transformation_mode: featherlessProvider ? featherlessMode : undefined,
           transformation_state: featherlessProvider ? transformationState : undefined,
@@ -1943,8 +1996,9 @@ export function createProxy(config: ProxyConfig = {}) {
     let errorBodyPromise: Promise<string | undefined>;
     let measurementPromise: Promise<OutputMeasurement | undefined>;
     let stopReasonPromise: Promise<string | undefined>;
+    let streamTerminationPromise: Promise<StreamTerminationReason | undefined>;
     try {
-      ({ response: teed, usagePromise, errorBodyPromise, measurementPromise, stopReasonPromise } =
+      ({ response: teed, usagePromise, errorBodyPromise, measurementPromise, stopReasonPromise, streamTerminationPromise } =
         teeForUsage(upstreamRes));
     } catch (e) {
       releaseInFlight();
@@ -1954,13 +2008,14 @@ export function createProxy(config: ProxyConfig = {}) {
       throw e;
     }
 
-    // Fire event in background once all four resolve (all share the same stream read).
+    // Fire event in background once all promises resolve (all share the same stream read).
     void Promise.all([
       usagePromise.catch(() => undefined),
       errorBodyPromise.catch(() => undefined),
       measurementPromise.catch(() => undefined),
       stopReasonPromise.catch(() => undefined),
-    ]).then(([usage, errorBody, measurement, stopReason]) => {
+      streamTerminationPromise.catch(() => undefined),
+    ]).then(([usage, errorBody, measurement, stopReason, streamTermination]) => {
       // A rejected request never populated a prefix cache, so the append-only
       // freeze this session was protecting protects nothing: let the next turn
       // re-cut the grid for density instead of preserving dead bytes.
@@ -1985,6 +2040,7 @@ export function createProxy(config: ProxyConfig = {}) {
         config.captureErrorReqBody ? errorBody : undefined,
         measurement,
         stopReason,
+        streamTermination,
       );
     }).finally(() => {
       releaseInFlight();

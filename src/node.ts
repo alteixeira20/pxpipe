@@ -49,6 +49,7 @@ import {
   resolveClaudePort,
 } from './core/claude-cli.js';
 import { resolveCompressionProfile } from './core/safety-policy.js';
+import { getAllowedModelBases, getRequestedModelBases } from './core/applicability.js';
 
 /** Runtime config. The core transform tuning comes from DEFAULTS in
  *  transform.ts; startup knobs cover deployment plus emergency GPT scope
@@ -1621,6 +1622,8 @@ async function main(): Promise<void> {
             Response.json({
               profile: compressionProfile.name,
               providers: providerRouter.inspect().providers,
+              allowedModelBases: getAllowedModelBases(),
+              requestedModelBases: getRequestedModelBases(),
             }),
             res,
           );

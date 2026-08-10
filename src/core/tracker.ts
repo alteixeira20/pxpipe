@@ -174,6 +174,8 @@ export interface TrackEvent {
   /** Model stop reason ("end_turn", "tool_use", "max_tokens", "refusal", …).
    *  OpenAI finish_reason ("stop", "length", "content_filter", …) lands in the same field. */
   stop_reason?: string;
+  /** Non-secret classification of stream termination: response_terminal, client_aborted, or upstream_ended_without_usage. */
+  stream_termination?: 'response_terminal' | 'client_aborted' | 'upstream_ended_without_usage';
   /** True when the stop reason indicates a safety classifier fired ("refusal" /
    *  "content_filter"). Refusal rows emit almost no output and would otherwise
    *  read as "cheap" — scorers MUST fail cost comparisons on these rows, and a
@@ -427,6 +429,9 @@ export function toTrackEvent(ev: ProxyEvent): TrackEvent {
   if (ev.stopReason) {
     out.stop_reason = ev.stopReason;
     if (SAFETY_STOP_REASONS.has(ev.stopReason)) out.safety_flagged = true;
+  }
+  if (ev.streamTermination) {
+    out.stream_termination = ev.streamTermination;
   }
 
   // Featherless observability fields — only emitted when set (non-Featherless requests stay lean).

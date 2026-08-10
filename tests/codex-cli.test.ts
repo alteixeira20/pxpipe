@@ -284,9 +284,42 @@ describe('route readiness', () => {
 describe('codex compression gate reporting', () => {
   // Routing and compression are separate: doctor must not imply savings that
   // the active safety scope will not deliver.
-  it('reports compression inactive for GPT under the default coding-safe scope', () => {
-    const gate = codexCompressionGate('coding-safe', CODEX_REFERENCE_MODEL, isPxpipeSupportedModelForScope);
+  it('reports compression active when daemon allowedModelBases includes gpt-5.6-sol under coding-safe', () => {
+    const gate = codexCompressionGate(
+      'coding-safe',
+      CODEX_REFERENCE_MODEL,
+      isPxpipeSupportedModelForScope,
+      ['claude-sonnet-5', 'gpt-5.6-sol'],
+    );
+    expect(gate).toEqual({ profile: 'coding-safe', model: 'gpt-5.6-sol', compresses: true });
+  });
+
+  it('reports compression inactive when daemon allowedModelBases excludes gpt-5.6-sol', () => {
+    const gate = codexCompressionGate(
+      'coding-safe',
+      CODEX_REFERENCE_MODEL,
+      isPxpipeSupportedModelForScope,
+      ['claude-sonnet-5'],
+    );
     expect(gate).toEqual({ profile: 'coding-safe', model: 'gpt-5.6-sol', compresses: false });
+  });
+
+  it('caller shell env cannot make doctor disagree with daemon when allowedModelBases is returned', () => {
+    const previous = process.env.PXPIPE_MODELS;
+    process.env.PXPIPE_MODELS = 'unrelated-model';
+    try {
+      // Daemon environment has gpt-5.6-sol, caller shell environment does not.
+      const gate = codexCompressionGate(
+        'coding-safe',
+        CODEX_REFERENCE_MODEL,
+        isPxpipeSupportedModelForScope,
+        ['claude-sonnet-5', 'gpt-5.6-sol'],
+      );
+      expect(gate.compresses).toBe(true);
+    } finally {
+      if (previous === undefined) delete process.env.PXPIPE_MODELS;
+      else process.env.PXPIPE_MODELS = previous;
+    }
   });
 
   it('reports compression active once an operator selects a scope that admits GPT', () => {

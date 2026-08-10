@@ -192,12 +192,14 @@ function unqualifiedModelId(base: string): string | null {
 function isAllowedForScope(
   model: string | null | undefined,
   scope: PxpipeSafetyScope,
+  allowedBases?: readonly string[],
 ): boolean {
   if (typeof model !== 'string') return false;
   const base = baseModelId(model).toLowerCase();
   if (isMisresolvedModelId(base)) return false;
   const unqualified = unqualifiedModelId(base);
-  return allowedModelBasesForScope(scope).some((b) => {
+  const targetBases = allowedBases ?? allowedModelBasesForScope(scope);
+  return targetBases.some((b) => {
     const target = b.toLowerCase();
     return modelBaseMatches(base, target)
       || (unqualified !== null && modelBaseMatches(unqualified, target));
@@ -208,8 +210,9 @@ function isAllowedForScope(
 export function isPxpipeSupportedModelForScope(
   model: string | null | undefined,
   scope: PxpipeSafetyScope,
+  allowedBases?: readonly string[],
 ): boolean {
-  return isAllowedForScope(model, scope);
+  return isAllowedForScope(model, scope, allowedBases);
 }
 
 /** True when pxpipe may transform this Anthropic/Google model under the active host scope. */

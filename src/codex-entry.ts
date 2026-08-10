@@ -121,6 +121,7 @@ async function runCodexDoctor(args: readonly string[]): Promise<void> {
       route.profile,
       CODEX_REFERENCE_MODEL,
       isPxpipeSupportedModelForScope,
+      route.allowedModelBases,
     ),
     transport: 'https-responses',
     mode: persistent && route.codexRouteReady ? 'persistent' : 'direct',

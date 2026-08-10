@@ -226,6 +226,8 @@ export interface CodexRouteReadiness {
   providers: string[];
   /** Compression profile the listener is actually running, not the doctor's env. */
   profile?: string;
+  /** Allowed model bases from the running listener. */
+  allowedModelBases?: string[];
 }
 
 /** Ask the persistent listener which provider routes it actually serves. */
@@ -238,15 +240,23 @@ export async function inspectCodexRoute(
       signal: AbortSignal.timeout(1_000),
     });
     if (!response.ok) return { reachable: false, codexRouteReady: false, providers: [] };
-    const body = await response.json() as { providers?: Array<{ id?: unknown }>; profile?: unknown };
+    const body = await response.json() as {
+      providers?: Array<{ id?: unknown }>;
+      profile?: unknown;
+      allowedModelBases?: unknown;
+    };
     const providers = (body.providers ?? [])
       .map((provider) => (typeof provider?.id === 'string' ? provider.id : ''))
       .filter(Boolean);
+    const allowedModelBases = Array.isArray(body.allowedModelBases)
+      ? body.allowedModelBases.filter((b): b is string => typeof b === 'string')
+      : undefined;
     return {
       reachable: true,
       codexRouteReady: providers.includes(CODEX_PROVIDER_ID),
       providers,
       ...(typeof body.profile === 'string' ? { profile: body.profile } : {}),
+      ...(allowedModelBases ? { allowedModelBases } : {}),
     };
   } catch {
     return { reachable: false, codexRouteReady: false, providers: [] };
@@ -275,10 +285,11 @@ export interface CodexCompressionGate {
 export function codexCompressionGate(
   profile: string | undefined,
   model: string,
-  admits: (model: string, scope: SafetyScopeName) => boolean,
+  admits: (model: string, scope: SafetyScopeName, allowedBases?: readonly string[]) => boolean,
+  allowedBases?: readonly string[],
 ): CodexCompressionGate {
   const scope = (profile ?? 'coding-safe') as SafetyScopeName;
-  return { profile: scope, model, compresses: admits(model, scope) };
+  return { profile: scope, model, compresses: admits(model, scope, allowedBases) };
 }
 
 type SafetyScopeName = 'coding-safe' | 'balanced' | 'aggressive' | 'passthrough';
