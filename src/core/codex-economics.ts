@@ -104,7 +104,7 @@ function eventEffective(event: TrackEvent): {
   haveUsage: boolean;
   haveCounterfactual: boolean;
 } {
-  const { input, output, cached, haveUsage } = eventUsage(event);
+  const { input, cached, haveUsage } = eventUsage(event);
   if (!haveUsage) {
     return { actual: 0, baseline: 0, saved: 0, haveUsage: false, haveCounterfactual: false };
   }
@@ -175,9 +175,11 @@ export function buildCodexEconomicsReport(
 ): CodexEconomicsReport {
   const events = source.filter((event) => isCodexResponseEvent(event, model));
   const transformedEvents = events.filter((event) => event.compressed === true);
-  const passthroughEvents = events.filter((event) =>
-    event.provider === 'codex-passthrough'
-    || (event.compressed !== true && (event.reason === 'compress=false' || event.reason === 'compression_disabled')));
+  // Only the explicit routed experiment arm is an A/B baseline. A generic
+  // `compress=false` Codex row can come from fail-open recovery, a dashboard
+  // kill switch, or another operational condition and must not contaminate the
+  // comparison cohort.
+  const passthroughEvents = events.filter((event) => event.provider === 'codex-passthrough');
 
   let usageRequests = 0;
   let providerInputTokens = 0;
