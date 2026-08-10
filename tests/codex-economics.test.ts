@@ -32,6 +32,7 @@ const compressed = (): TrackEvent => event({
 });
 
 const passthrough = (): TrackEvent => event({
+  provider: 'codex-passthrough',
   compressed: false,
   reason: 'compress=false',
   input_tokens: 1000,
@@ -69,6 +70,22 @@ describe('Codex economics report', () => {
     expect(report.abReady).toBe(false);
     expect(report.passthroughBaselineRequests).toBe(0);
     expect(report.note).toContain('pxpipe codex --passthrough');
+  });
+
+  it('does not treat fail-open or globally disabled Codex rows as controlled A/B samples', () => {
+    const report = buildCodexEconomicsReport([
+      compressed(),
+      event({
+        compressed: false,
+        reason: 'compress=false',
+        input_tokens: 1000,
+        cached_tokens: 900,
+        output_tokens: 10,
+      }),
+    ]);
+    expect(report.requests).toBe(2);
+    expect(report.passthroughBaselineRequests).toBe(0);
+    expect(report.passthrough.requests).toBe(0);
   });
 
   it('marks a balanced routed sample as ready without pretending selection bias disappeared', () => {
