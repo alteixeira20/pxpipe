@@ -315,7 +315,19 @@ export async function observeGoogleTrajectory(
     : typeof outer.model === 'string'
       ? outer.model
       : '';
-  const sessionSha8 = await sha256Prefix(`${model}\n${googleFirstUserMaterial(contents)}`, 8);
+  // Antigravity exposes a provider-owned nested sessionId. Prefer it over
+  // prompt material so separate AGY sessions with identical opening prompts
+  // cannot share breaker state. Only its digest leaves this function. Public
+  // Google often has no session id, so fall back to the first textual user
+  // request; if neither exists, skip trajectory mutation rather than grouping
+  // unrelated requests under a model-only pseudo-session.
+  const providerSessionId = typeof request.sessionId === 'string'
+    ? request.sessionId.trim()
+    : '';
+  const firstUser = googleFirstUserMaterial(contents);
+  const sessionMaterial = providerSessionId || firstUser;
+  if (!sessionMaterial) return undefined;
+  const sessionSha8 = await sha256Prefix(`${model}\n${sessionMaterial}`, 8);
   const state = getSession(sessionSha8);
   let newToolCalls = 0;
   let newReadLikeCalls = 0;

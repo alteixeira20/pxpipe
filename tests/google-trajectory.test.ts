@@ -69,6 +69,31 @@ describe('Google/Antigravity trajectory guard', () => {
     });
   });
 
+  it('isolates identical AGY prompts by the provider session id', async () => {
+    const base = JSON.parse(new TextDecoder().decode(googleBody(1, true)));
+    base.request.sessionId = 'agy-session-a';
+    const a = await observeGoogleTrajectory(
+      enc.encode(JSON.stringify(base)), 'gemini-3.6-flash-high', true,
+    );
+    base.request.sessionId = 'agy-session-b';
+    const b = await observeGoogleTrajectory(
+      enc.encode(JSON.stringify(base)), 'gemini-3.6-flash-high', true,
+    );
+    expect(a?.sessionSha8).not.toBe(b?.sessionSha8);
+    expect(a?.newReadLikeCalls).toBe(1);
+    expect(b?.newReadLikeCalls).toBe(1);
+  });
+
+  it('does not create a model-wide breaker bucket when no session or user material exists', async () => {
+    const body = enc.encode(JSON.stringify({
+      model: 'gemini-3.6-flash-high',
+      request: {
+        contents: [{ role: 'model', parts: [{ functionCall: { name: 'Read', args: { file_path: '/x' } } }] }],
+      },
+    }));
+    expect(await observeGoogleTrajectory(body, 'gemini-3.6-flash-high', true)).toBeUndefined();
+  });
+
   it('understands the nested Antigravity request without hashing provider metadata into the task', async () => {
     const a = await observeGoogleTrajectory(
       googleBody(1, true),
