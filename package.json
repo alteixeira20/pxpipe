@@ -1,7 +1,7 @@
 {
   "name": "pxpipe-proxy",
   "version": "0.13.0",
-  "description": "Token-saving proxy for Claude Code: renders bulky context (system prompt, tool docs, old history) as dense PNGs to cut input tokens. Runs on Node and Cloudflare Workers.",
+  "description": "Reliability-first token-saving proxy for coding agents across Anthropic, OpenAI-compatible, Gemini/Antigravity and Featherless traffic.",
   "type": "module",
   "bin": {
     "pxpipe": "bin/cli.js"
@@ -62,15 +62,17 @@
     "vendor:ui": "node scripts/vendor-ui.mjs"
   },
   "keywords": [
-    "claude",
+    "coding-agent",
     "claude-code",
+    "antigravity",
+    "gemini",
     "anthropic",
-    "fable-5",
+    "openai",
+    "featherless",
     "proxy",
     "token-optimization",
     "prompt-cache",
-    "vision-tokens",
-    "cloudflare-workers"
+    "vision-tokens"
   ],
   "engines": {
     "node": ">=20.19.0"
@@ -93,10 +95,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/teamchong/pxpipe.git"
+    "url": "git+https://github.com/alteixeira20/pxpipe.git"
   },
-  "homepage": "https://github.com/teamchong/pxpipe#readme",
+  "homepage": "https://github.com/alteixeira20/pxpipe#readme",
   "bugs": {
-    "url": "https://github.com/teamchong/pxpipe/issues"
+    "url": "https://github.com/alteixeira20/pxpipe/issues"
   }
 }
