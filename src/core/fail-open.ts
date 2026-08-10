@@ -10,6 +10,8 @@ const SNIFF_LIMIT = 4 * 1024;
 /** Internal loopback control used by `pxpipe codex --passthrough` to create a
  * comparable routed baseline. It is stripped before the provider sees it. */
 export const PXPIPE_COMPRESSION_CONTROL_HEADER = 'x-pxpipe-compression';
+const CODEX_BASELINE_VALUE = 'codex-passthrough';
+const CODEX_BASELINE_PROVIDER = 'codex-passthrough';
 
 type ProxyRequest = Parameters<ReturnType<typeof createProxy>>[0];
 
@@ -141,9 +143,15 @@ export async function isPxpipeTransformFailure(response: Response): Promise<bool
   }
 }
 
-function requestsPassthroughBaseline(request: Request): boolean {
+type CompressionControl = 'none' | 'passthrough' | 'codex-passthrough';
+
+function compressionControl(request: Request): CompressionControl {
   const value = request.headers.get(PXPIPE_COMPRESSION_CONTROL_HEADER)?.trim().toLowerCase();
-  return value === 'off' || value === 'false' || value === '0' || value === 'passthrough';
+  if (value === CODEX_BASELINE_VALUE) return 'codex-passthrough';
+  if (value === 'off' || value === 'false' || value === '0' || value === 'passthrough') {
+    return 'passthrough';
+  }
+  return 'none';
 }
 
 /** Remove PXPipe's child-control header before any upstream request. The header
@@ -172,10 +180,10 @@ function stripCompressionControl(request: Request): Request {
  *
  * The same native path is deliberately reusable as a per-process experiment arm:
  * `pxpipe codex --passthrough` injects an internal header on the loopback hop. The
- * wrapper strips it and routes that request through `fallback`, preserving the SAME
- * ChatGPT endpoint, auth, response scanner and event accounting while changing only
- * the compression decision. This is a materially better A/B baseline than `--direct`,
- * which bypasses PXPipe and therefore loses comparable telemetry.
+ * wrapper strips it and routes that request through a separate native proxy whose
+ * event is labelled `provider=codex-passthrough`. The serving endpoint, auth,
+ * response scanner and accounting stay identical. This is a materially better A/B
+ * baseline than `--direct`, which bypasses PXPipe and loses comparable telemetry.
  *
  * The primary proxy's synthetic transform-error event is suppressed because it never
  * reached an upstream and the caller ultimately sees the fallback result. This keeps
@@ -207,11 +215,27 @@ export function createFailOpenProxy(
     transform: { compress: false },
     featherlessTransformMode: 'off',
   });
+  const codexBaseline = createProxy({
+    ...hostedConfig,
+    transform: { compress: false },
+    featherlessTransformMode: 'off',
+    onRequest: observer
+      ? async (event) => {
+          // Set before the provider-router observer runs; it uses ??= and will
+          // therefore preserve this experiment identity in the JSONL row.
+          event.provider = CODEX_BASELINE_PROVIDER;
+          await observer(event);
+        }
+      : undefined,
+  });
 
   return async (request: Request): Promise<Response> => {
-    const forcePassthrough = requestsPassthroughBaseline(request);
+    const control = compressionControl(request);
     const routedRequest = stripCompressionControl(request);
-    if (forcePassthrough) {
+    if (control === 'codex-passthrough') {
+      return codexBaseline(asProxyRequest(routedRequest));
+    }
+    if (control === 'passthrough') {
       return fallback(asProxyRequest(routedRequest));
     }
     if (!mayTransformRequest(routedRequest)) return primary(asProxyRequest(routedRequest));
