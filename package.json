@@ -91,6 +91,7 @@
     "wrangler": "^4.92.0"
   },
   "dependencies": {
+    "fzstd": "0.1.1",
     "gpt-tokenizer": "^3.4.0"
   },
   "repository": {

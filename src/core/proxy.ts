@@ -37,6 +37,7 @@ import {
 } from './antigravity.js';
 import { resolveGoogleTransportProfile } from './google-transport-profiles.js';
 import { resolveGptProfile } from './gpt-model-profiles.js';
+import { Decompress as ZstdDecompress } from 'fzstd';
 import {
   buildFeatherlessUpstreamUrl,
   detectProviderErrorEnvelope,
@@ -94,6 +95,10 @@ export interface ProxyConfig {
   /** Persist 4xx diagnostics: the gzipped request body plus the upstream error
    *  body. Off by default because either side may contain prompts or secrets. */
   captureErrorReqBody?: boolean;
+  /** Decode zstd-compressed JSON request bodies before model parsing and
+   * transformation. Intended for the ChatGPT-authenticated Codex route; other
+   * OpenAI-compatible routes retain their existing byte-for-byte behavior. */
+  decodeZstdRequests?: boolean;
   /** Abort the upstream request if response headers have not arrived within this
    *  many ms. Cleared once headers land, so long generations are unaffected.
    *  0 disables. */
@@ -1026,6 +1031,33 @@ function teeForUsage(res: Response): {
 const DEFAULT_UPSTREAM = 'https://api.anthropic.com';
 const DEFAULT_OPENAI_UPSTREAM = 'https://api.openai.com';
 
+/** Bound decompression before parsing. This is above the largest request seen
+ * in local provider telemetry, while preventing a malformed loopback request
+ * from expanding without limit inside the persistent daemon. */
+const MAX_DECODED_REQUEST_BYTES = 64 * 1024 * 1024;
+
+function decodeZstdRequest(body: Uint8Array): Uint8Array {
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  const decoder = new ZstdDecompress((chunk) => {
+    total += chunk.byteLength;
+    if (total > MAX_DECODED_REQUEST_BYTES) {
+      throw new Error('zstd request exceeds decoded size limit');
+    }
+    chunks.push(chunk);
+  });
+  decoder.push(body, true);
+
+  if (chunks.length === 1) return chunks[0]!;
+  const decoded = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    decoded.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return decoded;
+}
+
 /** Headers we strip on the way out — they're hop-by-hop or proxy-injected. */
 const STRIP_REQ_HEADERS = new Set([
   'host',
@@ -1429,6 +1461,7 @@ export function createProxy(config: ProxyConfig = {}) {
     let fallbackResult: 'success' | 'failed' | 'not_attempted' | undefined = 'not_attempted';
     let upstreamAttemptCount = 1;
     let originalBodyBytes: Uint8Array | undefined;
+    let decodedRequestContentEncoding = false;
 
     // Two count_tokens probes on the pre-compression body (see docs/HISTORY_CACHE_MODEL.md):
     //   baselinePromise          → full-body input_tokens
@@ -1440,7 +1473,20 @@ export function createProxy(config: ProxyConfig = {}) {
     let trajectory: TrajectoryObservation | undefined;
 
     if (isMessages || isOpenAIChat || isOpenAIResponses || isGoogle) {
-      const bodyIn = new Uint8Array(await req.arrayBuffer());
+      const wireBody: Uint8Array = new Uint8Array(await req.arrayBuffer());
+      let bodyIn: Uint8Array = wireBody;
+      if (
+        config.decodeZstdRequests
+        && req.headers.get('content-encoding')?.trim().toLowerCase() === 'zstd'
+      ) {
+        try {
+          bodyIn = decodeZstdRequest(wireBody);
+          decodedRequestContentEncoding = true;
+        } catch {
+          // Fail open on an unknown/malformed encoding: preserve the original
+          // wire bytes and let normal missing-model admission abstain honestly.
+        }
+      }
       originalBodyBytes = bodyIn;
       try {
         const transformOpts =
@@ -1746,6 +1792,7 @@ export function createProxy(config: ProxyConfig = {}) {
     }
 
     const outHeaders = filterHeaders(req.headers, STRIP_REQ_HEADERS);
+    if (decodedRequestContentEncoding) outHeaders.delete('content-encoding');
     if (isOpenAIPath || bridgedGptMessages || bridgedChatMessages) {
       outHeaders.delete('x-api-key');
       // Never forward a Messages client's bearer credential across providers.

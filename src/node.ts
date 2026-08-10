@@ -1466,6 +1466,7 @@ async function main(): Promise<void> {
         protocol: 'openai',
         proxy: {
           ...config,
+          decodeZstdRequests: true,
           provider: undefined,
           gatewayBaseUrl: undefined,
           gatewayHeaders: {},
