@@ -7,6 +7,9 @@ import {
 const TRANSFORM_FAILURE_STATUS = 502;
 const TRANSFORM_FAILURE_MARKER = 'pxpipe transform failed';
 const SNIFF_LIMIT = 4 * 1024;
+/** Internal loopback control used by `pxpipe codex --passthrough` to create a
+ * comparable routed baseline. It is stripped before the provider sees it. */
+export const PXPIPE_COMPRESSION_CONTROL_HEADER = 'x-pxpipe-compression';
 
 type ProxyRequest = Parameters<ReturnType<typeof createProxy>>[0];
 
@@ -138,11 +141,41 @@ export async function isPxpipeTransformFailure(response: Response): Promise<bool
   }
 }
 
+function requestsPassthroughBaseline(request: Request): boolean {
+  const value = request.headers.get(PXPIPE_COMPRESSION_CONTROL_HEADER)?.trim().toLowerCase();
+  return value === 'off' || value === 'false' || value === '0' || value === 'passthrough';
+}
+
+/** Remove PXPipe's child-control header before any upstream request. The header
+ * controls only the local reliability wrapper and is never provider metadata. */
+function stripCompressionControl(request: Request): Request {
+  if (!request.headers.has(PXPIPE_COMPRESSION_CONTROL_HEADER)) return request;
+  const headers = new Headers(request.headers);
+  headers.delete(PXPIPE_COMPRESSION_CONTROL_HEADER);
+  const bodyAllowed = request.method !== 'GET' && request.method !== 'HEAD';
+  const init: RequestInit & { duplex?: 'half' } = {
+    method: request.method,
+    headers,
+    body: bodyAllowed ? request.body : undefined,
+    redirect: request.redirect,
+    signal: request.signal,
+  };
+  if (request.body) init.duplex = 'half';
+  return new Request(request.url, init);
+}
+
 /**
  * Wrap the normal proxy with a single fail-open pass-through retry for transform
  * failures. The retry still uses createProxy, so provider routing, auth rotation,
  * Messages→Responses/Chat bridging, timeouts, duplicate protection and telemetry
  * remain identical; only `compress:false` changes.
+ *
+ * The same native path is deliberately reusable as a per-process experiment arm:
+ * `pxpipe codex --passthrough` injects an internal header on the loopback hop. The
+ * wrapper strips it and routes that request through `fallback`, preserving the SAME
+ * ChatGPT endpoint, auth, response scanner and event accounting while changing only
+ * the compression decision. This is a materially better A/B baseline than `--direct`,
+ * which bypasses PXPipe and therefore loses comparable telemetry.
  *
  * The primary proxy's synthetic transform-error event is suppressed because it never
  * reached an upstream and the caller ultimately sees the fallback result. This keeps
@@ -176,12 +209,17 @@ export function createFailOpenProxy(
   });
 
   return async (request: Request): Promise<Response> => {
-    if (!mayTransformRequest(request)) return primary(asProxyRequest(request));
+    const forcePassthrough = requestsPassthroughBaseline(request);
+    const routedRequest = stripCompressionControl(request);
+    if (forcePassthrough) {
+      return fallback(asProxyRequest(routedRequest));
+    }
+    if (!mayTransformRequest(routedRequest)) return primary(asProxyRequest(routedRequest));
 
     // Clone only a model-request shape and before the primary consumes the stream.
     // The clone is read only if the primary returns the exact pre-upstream marker.
-    const retryRequest = request.clone();
-    const response = await primary(asProxyRequest(request));
+    const retryRequest = routedRequest.clone();
+    const response = await primary(asProxyRequest(routedRequest));
     if (!(await isPxpipeTransformFailure(response))) return response;
 
     const retried = await fallback(asProxyRequest(retryRequest));
