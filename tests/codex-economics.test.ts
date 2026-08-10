@@ -1,8 +1,13 @@
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import { describe, expect, it } from 'vitest';
 
 import {
   buildCodexEconomicsReport,
   CODEX_AB_MIN_PER_ARM,
+  loadRecentTrackEvents,
 } from '../src/core/codex-economics.js';
 import type { TrackEvent } from '../src/core/tracker.js';
 
@@ -84,6 +89,44 @@ describe('Codex economics report', () => {
     expect(report.note).toMatch(/excluded from token percentages/i);
   });
 
+  it('does not treat output-only telemetry as authoritative provider input usage', () => {
+    const report = buildCodexEconomicsReport([event({
+      compressed: true,
+      output_tokens: 12,
+      baseline_imaged_tokens: 500,
+      image_tokens: 100,
+      native_injected_tokens: 20,
+    })]);
+
+    expect(report.requests).toBe(1);
+    expect(report.usageRequests).toBe(0);
+    expect(report.providerInputTokens).toBe(0);
+    expect(report.providerOutputTokens).toBe(12);
+    expect(report.transformsWithoutUsage).toBe(1);
+    expect(report.netRawSavedTokens).toBe(0);
+    expect(report.verdict).toBe('insufficient-data');
+  });
+
+  it('does not fabricate a counterfactual from incomplete transform counters', () => {
+    const report = buildCodexEconomicsReport([event({
+      compressed: true,
+      input_tokens: 1000,
+      output_tokens: 12,
+      baseline_imaged_tokens: 500,
+      // A missing image-token estimate makes the local transform delta incomplete.
+    })]);
+
+    expect(report.usageRequests).toBe(1);
+    expect(report.providerInputTokens).toBe(1000);
+    expect(report.baselineImagedTokens).toBe(0);
+    expect(report.imageTokens).toBe(0);
+    expect(report.netRawSavedTokens).toBe(0);
+    expect(report.rawBaselineProviderInput).toBe(1000);
+    expect(report.effectiveSavedInput).toBe(0);
+    expect(report.verdict).toBe('insufficient-data');
+    expect(report.note).toMatch(/incomplete transform counterfactual/i);
+  });
+
   it('requires routed passthrough observations before calling the A/B sample ready', () => {
     const report = buildCodexEconomicsReport(
       Array.from({ length: CODEX_AB_MIN_PER_ARM }, compressed),
@@ -120,6 +163,26 @@ describe('Codex economics report', () => {
     expect(report.note).toMatch(/selection bias/i);
   });
 
+  it('keeps contradictory transformed passthrough rows out of the baseline arm', () => {
+    const contradictory = event({
+      provider: 'codex-passthrough',
+      compressed: true,
+      input_tokens: 1000,
+      output_tokens: 1,
+      baseline_imaged_tokens: 500,
+      image_tokens: 100,
+    });
+    const report = buildCodexEconomicsReport([
+      ...Array.from({ length: CODEX_AB_MIN_PER_ARM }, compressed),
+      ...Array.from({ length: CODEX_AB_MIN_PER_ARM }, () => contradictory),
+    ]);
+
+    expect(report.transformed.requests).toBe(CODEX_AB_MIN_PER_ARM * 2);
+    expect(report.passthroughBaselineRequests).toBe(0);
+    expect(report.passthrough.requests).toBe(0);
+    expect(report.abReady).toBe(false);
+  });
+
   it('fails the verdict when native framing makes a transform net-negative', () => {
     const report = buildCodexEconomicsReport([event({
       compressed: true,
@@ -138,13 +201,122 @@ describe('Codex economics report', () => {
     expect(report.verdict).toBe('regression');
   });
 
-  it('ignores unrelated OpenAI traffic when explicit provider identity exists', () => {
+  it('counts raw margins below but not equal to five percent', () => {
+    const report = buildCodexEconomicsReport([
+      event({
+        compressed: true,
+        input_tokens: 1000,
+        baseline_imaged_tokens: 100,
+        image_tokens: 95,
+      }),
+      event({
+        compressed: true,
+        input_tokens: 1000,
+        baseline_imaged_tokens: 100,
+        image_tokens: 95,
+        native_injected_tokens: 1,
+      }),
+    ]);
+
+    expect(report.netNegativeTransforms).toBe(0);
+    expect(report.lowMarginTransforms).toBe(1);
+  });
+
+  it('uses full price for a cold transform and clamps cached tokens to provider input', () => {
+    const cold = buildCodexEconomicsReport([event({
+      compressed: true,
+      input_tokens: 1000,
+      cached_tokens: 0,
+      baseline_imaged_tokens: 500,
+      image_tokens: 100,
+      native_injected_tokens: 20,
+    })]);
+    expect(cold.effectiveActualInput).toBe(1000);
+    expect(cold.effectiveSavedInput).toBe(380);
+
+    const malformedCache = buildCodexEconomicsReport([event({
+      input_tokens: 1000,
+      output_tokens: 1,
+      cached_tokens: 5000,
+    })]);
+    expect(malformedCache.cachedTokens).toBe(1000);
+    expect(malformedCache.cacheSharePct).toBe(100);
+    expect(malformedCache.effectiveActualInput).toBe(100);
+  });
+
+  it('isolates explicit Codex inference from generic Responses and native compaction', () => {
     const report = buildCodexEconomicsReport([
       compressed(),
       event({ provider: 'openai', path: '/responses', input_tokens: 999_999 }),
       event({ provider: 'codex', path: '/models', input_tokens: 999_999 }),
+      event({ provider: 'codex', path: '/responses/compact', input_tokens: 999_999 }),
+      event({ provider: 'codex', accounting_provider: 'anthropic', input_tokens: 999_999 }),
+      event({ provider: 'codex', method: 'GET', input_tokens: 999_999 }),
     ]);
     expect(report.requests).toBe(1);
     expect(report.providerInputTokens).toBe(1000);
+  });
+
+  it('uses legacy provider-less rows only with an exact model filter', () => {
+    const legacy = event({ provider: undefined, input_tokens: 321, output_tokens: 4 });
+    const unrelated = event({
+      provider: undefined,
+      model: 'gpt-5.6-terra',
+      input_tokens: 999_999,
+    });
+
+    expect(buildCodexEconomicsReport([legacy, unrelated]).requests).toBe(0);
+    const report = buildCodexEconomicsReport([legacy, unrelated], 'gpt-5.6-sol');
+    expect(report.requests).toBe(1);
+    expect(report.legacyIdentityRequests).toBe(1);
+    expect(report.providerInputTokens).toBe(321);
+    expect(report.note).toMatch(/provider-less legacy/i);
+  });
+
+  it('does not label a mixed-model aggregate as one of its constituent models', () => {
+    const report = buildCodexEconomicsReport([
+      compressed(),
+      event({ model: 'gpt-5.6-terra', input_tokens: 100, output_tokens: 1 }),
+    ]);
+
+    expect(report.requests).toBe(2);
+    expect(report.model).toBeNull();
+  });
+});
+
+describe('Codex economics event tail', () => {
+  it('retains the first row when the bounded tail starts exactly at a line boundary', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pxpipe-codex-report-'));
+    const file = join(dir, 'events.jsonl');
+    try {
+      const first = `${JSON.stringify(event({ input_tokens: 111 }))}\n`;
+      const second = `${JSON.stringify(event({ input_tokens: 222 }))}\n`;
+      writeFileSync(file, first + second);
+
+      const loaded = loadRecentTrackEvents(file, Buffer.byteLength(second));
+      expect(loaded).toHaveLength(1);
+      expect(loaded[0]?.input_tokens).toBe(222);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('discards only the partial row when a bounded tail starts mid-line', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pxpipe-codex-report-'));
+    const file = join(dir, 'events.jsonl');
+    try {
+      const first = `${JSON.stringify(event({ input_tokens: 111 }))}\n`;
+      const second = `${JSON.stringify(event({ input_tokens: 222 }))}\n`;
+      writeFileSync(file, first + second);
+
+      const loaded = loadRecentTrackEvents(
+        file,
+        Buffer.byteLength(second) + Math.floor(Buffer.byteLength(first) / 2),
+      );
+      expect(loaded).toHaveLength(1);
+      expect(loaded[0]?.input_tokens).toBe(222);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

@@ -26,9 +26,12 @@ export interface CodexEconomicsCohort {
 export interface CodexEconomicsReport {
   model: string | null;
   requests: number;
+  /** Provider-less historical rows admitted only by an explicit model filter. */
+  legacyIdentityRequests: number;
   usageRequests: number;
   transformedRequests: number;
   transformsWithoutUsage: number;
+  transformsWithoutCounterfactual: number;
   passthroughBaselineRequests: number;
   /** Provider-reported actual input/output usage. */
   providerInputTokens: number;
@@ -73,11 +76,14 @@ function isFiniteNumber(value: unknown): value is number {
 
 function isCodexResponseEvent(event: TrackEvent, model?: string): boolean {
   if (model && event.model !== model) return false;
+  if (event.method.toUpperCase() !== 'POST') return false;
   const responses = /\/responses$/.test(event.path);
   // New logs are provider-explicit. Once an event has an identity, never fold a
   // generic OpenAI row into Codex merely because it shares the Responses wire.
   if (event.provider) {
-    return responses && (event.provider === 'codex' || event.provider === 'codex-passthrough');
+    return event.accounting_provider === 'openai'
+      && responses
+      && (event.provider === 'codex' || event.provider === 'codex-passthrough');
   }
   // Backward-compatible fallback only for old rows written before provider ids
   // were persisted. A model filter is required to avoid swallowing unrelated
@@ -99,7 +105,10 @@ function eventUsage(event: TrackEvent): {
   const cached = isFiniteNumber(event.cached_tokens)
     ? Math.max(0, Math.min(event.cached_tokens, input))
     : 0;
-  return { input, output, cached, haveUsage: input > 0 || output > 0 };
+  // This is an input-economics report. Output-only or partial stream telemetry
+  // is still reported as output, but cannot ground an input counterfactual or
+  // make an A/B row usage-complete.
+  return { input, output, cached, haveUsage: input > 0 };
 }
 
 function eventEffective(event: TrackEvent): {
@@ -110,10 +119,6 @@ function eventEffective(event: TrackEvent): {
   haveCounterfactual: boolean;
 } {
   const { input, cached, haveUsage } = eventUsage(event);
-  if (!haveUsage) {
-    return { actual: 0, baseline: 0, saved: 0, haveUsage: false, haveCounterfactual: false };
-  }
-  const actual = computeOpenAIActualInputEff(input, cached, event.model);
   const imageTokens = isFiniteNumber(event.image_tokens) ? Math.max(0, event.image_tokens) : 0;
   const baselineImaged = isFiniteNumber(event.baseline_imaged_tokens)
     ? Math.max(0, event.baseline_imaged_tokens)
@@ -122,6 +127,10 @@ function eventEffective(event: TrackEvent): {
     ? Math.max(0, event.native_injected_tokens)
     : 0;
   const haveCounterfactual = event.compressed === true && baselineImaged > 0 && imageTokens > 0;
+  if (!haveUsage) {
+    return { actual: 0, baseline: 0, saved: 0, haveUsage: false, haveCounterfactual };
+  }
+  const actual = computeOpenAIActualInputEff(input, cached, event.model);
   const baseline = haveCounterfactual
     ? computeOpenAIBaselineInputEff(
         input,
@@ -179,15 +188,19 @@ export function buildCodexEconomicsReport(
   model?: string,
 ): CodexEconomicsReport {
   const events = source.filter((event) => isCodexResponseEvent(event, model));
+  const legacyIdentityRequests = events.filter((event) => !event.provider).length;
   const transformedEvents = events.filter((event) => event.compressed === true);
   // Only the explicit routed experiment arm is an A/B baseline. A generic
   // `compress=false` Codex row can come from fail-open recovery, a dashboard
   // kill switch, or another operational condition and must not contaminate the
   // comparison cohort.
-  const passthroughEvents = events.filter((event) => event.provider === 'codex-passthrough');
+  const passthroughEvents = events.filter(
+    (event) => event.provider === 'codex-passthrough' && event.compressed === false,
+  );
 
   let usageRequests = 0;
   let transformsWithoutUsage = 0;
+  let transformsWithoutCounterfactual = 0;
   let providerInputTokens = 0;
   let providerOutputTokens = 0;
   let cachedTokens = 0;
@@ -198,6 +211,7 @@ export function buildCodexEconomicsReport(
   let effectiveBaselineInput = 0;
   let transformedActual = 0;
   let transformedBaseline = 0;
+  let counterfactualUsageRequests = 0;
   let netNegativeTransforms = 0;
   let lowMarginTransforms = 0;
   let safetyFlagged = 0;
@@ -206,10 +220,12 @@ export function buildCodexEconomicsReport(
   for (const event of events) {
     const usage = eventUsage(event);
     const eff = eventEffective(event);
+    // Output usage remains provider-reported even when a partial event lacks
+    // the input counter needed by every input-economics denominator below.
+    providerOutputTokens += usage.output;
     if (usage.haveUsage) {
       usageRequests += 1;
       providerInputTokens += usage.input;
-      providerOutputTokens += usage.output;
       cachedTokens += usage.cached;
       effectiveActualInput += eff.actual;
       effectiveBaselineInput += eff.baseline;
@@ -227,9 +243,13 @@ export function buildCodexEconomicsReport(
     const injected = isFiniteNumber(event.native_injected_tokens)
       ? Math.max(0, event.native_injected_tokens)
       : 0;
-    const net = baseline - image - injected;
-    if (baseline > 0 && net <= 0) netNegativeTransforms += 1;
-    if (baseline > 0 && net > 0 && net / baseline < 0.05) lowMarginTransforms += 1;
+    if (eff.haveCounterfactual) {
+      const net = baseline - image - injected;
+      if (net <= 0) netNegativeTransforms += 1;
+      if (net > 0 && net / baseline < 0.05) lowMarginTransforms += 1;
+    } else {
+      transformsWithoutCounterfactual += 1;
+    }
 
     // A transform delta is known locally even when a stream ended before the
     // terminal usage block, but combining that delta with a provider-input sum
@@ -239,13 +259,16 @@ export function buildCodexEconomicsReport(
       transformsWithoutUsage += 1;
       continue;
     }
+    // Both local sides of the replacement must be present before their delta
+    // can be combined with provider input. Treating an absent image estimate as
+    // zero would manufacture raw savings from incomplete telemetry.
+    if (!eff.haveCounterfactual) continue;
     baselineImagedTokens += baseline;
     imageTokens += image;
     nativeInjectedTokens += injected;
-    if (eff.haveCounterfactual) {
-      transformedActual += eff.actual;
-      transformedBaseline += eff.baseline;
-    }
+    counterfactualUsageRequests += 1;
+    transformedActual += eff.actual;
+    transformedBaseline += eff.baseline;
   }
 
   const grossRawSavedTokens = baselineImagedTokens - imageTokens;
@@ -280,7 +303,11 @@ export function buildCodexEconomicsReport(
     : null;
 
   let verdict: CodexEconomicsVerdict;
-  if (usageRequests === 0 || transformed.usageRequests === 0) verdict = 'insufficient-data';
+  if (
+    usageRequests === 0
+    || transformed.usageRequests === 0
+    || counterfactualUsageRequests === 0
+  ) verdict = 'insufficient-data';
   else if (netNegativeTransforms > 0 || effectiveSavedPct < 0) verdict = 'regression';
   else if (effectiveSavedPct < 1) verdict = 'marginal';
   else if (effectiveSavedPct < 5) verdict = 'modest';
@@ -289,16 +316,32 @@ export function buildCodexEconomicsReport(
   const usageCaveat = transformsWithoutUsage > 0
     ? ` ${transformsWithoutUsage} transformed request(s) lacked terminal provider usage and are excluded from token percentages.`
     : '';
+  const counterfactualCaveat = transformsWithoutCounterfactual > 0
+    ? ` ${transformsWithoutCounterfactual} transformed request(s) had an incomplete transform counterfactual and contribute no claimed savings.`
+    : '';
+  const legacyIdentityCaveat = legacyIdentityRequests > 0
+    ? ` ${legacyIdentityRequests} provider-less legacy request(s) were included by the explicit model/path/accounting heuristic; their Codex route identity is not independently proven.`
+    : '';
+  const counterfactualAvailable = baselineImagedTokens > 0 && imageTokens > 0;
   const note = !abReady
-    ? `Token counterfactual is available, but a controlled routed A/B needs at least ${CODEX_AB_MIN_PER_ARM} usage-complete transformed and ${CODEX_AB_MIN_PER_ARM} passthrough requests. Run comparable tasks with pxpipe codex and pxpipe codex --passthrough.${usageCaveat}`
-    : `A/B cohorts are large enough for a first observed comparison, but the compression gate creates selection bias. Compare similar tasks and use the provider-grounded counterfactual as the primary token-economics measure.${usageCaveat}`;
+    ? `${counterfactualAvailable ? 'Token counterfactual is available' : 'No provider-grounded token counterfactual is available yet'}, but a controlled routed A/B needs at least ${CODEX_AB_MIN_PER_ARM} usage-complete transformed and ${CODEX_AB_MIN_PER_ARM} passthrough requests. Run comparable tasks with pxpipe codex and pxpipe codex --passthrough.${usageCaveat}${counterfactualCaveat}${legacyIdentityCaveat}`
+    : `A/B cohorts are large enough for a first observed comparison, but the compression gate creates selection bias. Compare similar tasks and use the provider-grounded counterfactual as the primary token-economics measure.${usageCaveat}${counterfactualCaveat}${legacyIdentityCaveat}`;
+
+  const observedModels = new Set(
+    events.map((event) => event.model).filter((value): value is string => Boolean(value)),
+  );
+  const observedModel = observedModels.size === 1 && events.every((event) => event.model)
+    ? observedModels.values().next().value ?? null
+    : null;
 
   return {
-    model: model ?? events.find((event) => event.model)?.model ?? null,
+    model: model ?? observedModel,
     requests: events.length,
+    legacyIdentityRequests,
     usageRequests,
     transformedRequests: transformedEvents.length,
     transformsWithoutUsage,
+    transformsWithoutCounterfactual,
     passthroughBaselineRequests: passthroughEvents.length,
     providerInputTokens,
     providerOutputTokens,
@@ -345,6 +388,12 @@ export function loadRecentTrackEvents(
   const start = Math.max(0, size - wanted);
   const fd = openSync(filePath, 'r');
   try {
+    let startsAtLineBoundary = start === 0;
+    if (start > 0) {
+      const preceding = Buffer.allocUnsafe(1);
+      startsAtLineBoundary = readSync(fd, preceding, 0, 1, start - 1) === 1
+        && preceding[0] === 0x0a;
+    }
     const buf = Buffer.allocUnsafe(wanted);
     let offset = 0;
     while (offset < wanted) {
@@ -353,7 +402,7 @@ export function loadRecentTrackEvents(
       offset += n;
     }
     let text = buf.subarray(0, offset).toString('utf8');
-    if (start > 0) {
+    if (!startsAtLineBoundary) {
       const nl = text.indexOf('\n');
       text = nl >= 0 ? text.slice(nl + 1) : '';
     }

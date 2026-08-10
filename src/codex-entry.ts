@@ -270,7 +270,13 @@ async function runCodexReport(args: readonly string[]): Promise<void> {
   console.log(`Codex token economics — ${report.model ?? options.model ?? 'all Codex models'}`);
   console.log(`  source:              ${eventsFile} (bounded recent tail)`);
   console.log(`  inference requests:  ${report.requests} (${report.usageRequests} with authoritative usage)`);
+  if (report.legacyIdentityRequests > 0) {
+    console.log(`  legacy identity:     ${report.legacyIdentityRequests} model-filtered row(s), route not independently proven`);
+  }
   console.log(`  transformed:         ${report.transformedRequests}`);
+  if (report.transformsWithoutUsage > 0 || report.transformsWithoutCounterfactual > 0) {
+    console.log(`  excluded savings:    ${report.transformsWithoutUsage} without input usage, ${report.transformsWithoutCounterfactual} without complete transform counters`);
+  }
   console.log(`  passthrough A/B arm: ${report.passthroughBaselineRequests}`);
   console.log(`  provider input:      ${fmt(report.providerInputTokens)} tok`);
   console.log(`  prompt-cache hits:   ${fmt(report.cachedTokens)} tok (${pct(report.cacheSharePct)})`);
