@@ -50,6 +50,12 @@ describe('Codex routed passthrough launch', () => {
     );
     expect(values).toContain(`model_provider=${CODEX_MODEL_PROVIDER_ID}`);
   });
+
+  it('does not add experiment metadata to a normal compressed Codex launch', () => {
+    const values = buildCodexConfigArgs('http://127.0.0.1:47821/providers/codex')
+      .filter((_value, index) => index % 2 === 1);
+    expect(values.some((value) => value.includes(CODEX_PASSTHROUGH_HEADER))).toBe(false);
+  });
 });
 
 describe('PXPipe per-process compression control', () => {
