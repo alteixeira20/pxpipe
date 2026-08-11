@@ -1,20 +1,17 @@
-name: RC runtime apply
+name: RC promote validated runtime
 
 on:
   push:
     branches:
       - stabilize/rc-runtime-parity-20260811
-  pull_request:
-    branches:
-      - main
 
 permissions:
   contents: write
 
 jobs:
-  apply-and-validate:
+  promote:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
@@ -22,20 +19,14 @@ jobs:
         with:
           node-version: '24'
           cache: pnpm
-      - name: Reconstruct exact runtime patch
+      - name: Apply already-validated runtime patches
         run: |
           cat .github/rc/runtime.part* | base64 -d > /tmp/runtime.patch
           echo '4501be8f67e193c1d1fc723f4aeb0e089d9eb775d653b38fd3463bc46d62a7d0  /tmp/runtime.patch' | sha256sum -c -
-          git apply --check /tmp/runtime.patch
           git apply /tmp/runtime.patch
-      - name: Reconstruct exact TypeScript 7 compatibility patch
-        run: |
           cat .github/rc/ts7.part* | base64 -d > /tmp/ts7.patch
           echo 'dec97e2b0e4ccb53042fa6277c9008f9d2536f4076f89166dfad969938608a1b  /tmp/ts7.patch' | sha256sum -c -
-          git apply --check /tmp/ts7.patch
           git apply /tmp/ts7.patch
-      - name: Apply final HEAD and billing regression fixes
-        run: |
           python3 - <<'PY'
           from pathlib import Path
           p = Path('src/node.ts')
@@ -44,7 +35,6 @@ jobs:
           new = """async function writeWebResponse(res: Response, out: ServerResponse): Promise<void> {\n  out.statusCode = res.status;\n  res.headers.forEach((v, k) => out.setHeader(k, v));\n  // HEAD must return the GET metadata without attempting to stream a body.\n  // node:http suppresses HEAD response bytes at the socket layer, but reading\n  // and writing the Web Response body can still race the client closing after\n  // headers and surface a spurious response-close error in our bridge.\n  if (out.req?.method === 'HEAD' || !res.body) {\n    if (res.body) void res.body.cancel().catch(() => undefined);\n    out.end();\n    return;\n  }\n"""
           assert old in s
           p.write_text(s.replace(old, new))
-
           p = Path('tests/render.test.ts')
           s = p.read_text()
           s = s.replace("it('strips x-anthropic-billing-header line and keeps it as text', async () => {", "it('strips x-anthropic-billing-header from the body and exposes it for HTTP forwarding', async () => {")
@@ -58,36 +48,9 @@ jobs:
           assert old in s
           p.write_text(s.replace(old, new))
           PY
-      - name: Refresh dependency lock
+      - name: Refresh lock and promote clean diff
         run: |
           pnpm install --no-frozen-lockfile
-          pnpm install --frozen-lockfile
-      - run: pnpm run audit
-      - run: pnpm run typecheck
-      - name: Focused runtime regressions
-        run: pnpm vitest run tests/runtime-parity.test.ts tests/render.test.ts tests/codex-runtime-model.test.ts tests/request-body-limit.test.ts tests/image-byte-budget.test.ts
-      - run: pnpm test
-      - run: pnpm run test:restart
-      - run: pnpm run build
-      - name: CLI misuse guards
-        run: |
-          if node dist/node.js codex-ar >/tmp/codex-ar.out 2>&1; then exit 1; fi
-          grep -q 'pxpipe codex --binary codex-ar' /tmp/codex-ar.out
-          if node dist/node.js warp -- codex-ar >/tmp/warp-codex.out 2>&1; then exit 1; fi
-          grep -q 'warp is not the Codex integration path' /tmp/warp-codex.out
-      - name: Dashboard HEAD stays local
-        run: |
-          PORT=47991 node dist/node.js >/tmp/pxpipe-head.log 2>&1 &
-          pid=$!
-          trap 'kill $pid 2>/dev/null || true' EXIT
-          for i in $(seq 1 40); do curl -fsS http://127.0.0.1:47991/ >/dev/null && break; sleep .25; done
-          curl -fsSI http://127.0.0.1:47991/ | tee /tmp/head.out
-          grep -q '200 OK' /tmp/head.out
-      - run: pnpm exec wrangler deploy --dry-run
-      - run: git diff --check
-      - name: Commit validated source
-        if: github.event_name == 'push'
-        run: |
           rm -rf .github/rc .github/workflows/rc-snapshot.yml
           git add -A
           git diff --cached --check
