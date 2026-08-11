@@ -1,0 +1,84 @@
+name: Stabilization Apply + Validate
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-validate:
+    if: github.head_ref == 'stabilize/full-hardening-20260811'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.head_ref }}
+          persist-credentials: true
+      - id: patch
+        name: Detect pending stabilization patch
+        shell: bash
+        run: |
+          if [[ -f .github/stabilization-final.patch.gz.b64 ]]; then
+            echo 'pending=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'pending=false' >> "$GITHUB_OUTPUT"
+            echo 'No pending stabilization patch; validation/apply already completed.'
+          fi
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        if: steps.patch.outputs.pending == 'true'
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        if: steps.patch.outputs.pending == 'true'
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Decode and apply exact source patch
+        if: steps.patch.outputs.pending == 'true'
+        shell: bash
+        run: |
+          base64 -d .github/stabilization-final.patch.gz.b64 | gzip -d > /tmp/pxpipe-stabilization.patch
+          echo '2c8aaf27638852f4fbcb0d5d17c501dc8f41688778d651a40964f90d1393fb75  /tmp/pxpipe-stabilization.patch' | sha256sum -c -
+          git apply --check /tmp/pxpipe-stabilization.patch
+          git apply /tmp/pxpipe-stabilization.patch
+          rm -f .github/stabilization-final.patch.gz.b64 .github/stabilize-batch1-*.patch
+          git diff --check
+      - name: Install frozen dependencies
+        if: steps.patch.outputs.pending == 'true'
+        run: pnpm install --frozen-lockfile
+      - name: Production dependency audit
+        if: steps.patch.outputs.pending == 'true'
+        run: pnpm run audit
+      - name: Typecheck
+        if: steps.patch.outputs.pending == 'true'
+        run: pnpm run typecheck
+      - name: Focused hardening tests
+        if: steps.patch.outputs.pending == 'true'
+        run: >-
+          pnpm vitest run
+          tests/credential-route-policy.test.ts
+          tests/request-body-limit.test.ts
+          tests/image-byte-budget.test.ts
+          tests/economics.test.ts
+          tests/cpt-fit.test.ts
+          tests/adaptive-calibration.test.ts
+          tests/render-cache.test.ts
+          tests/codex-economics.test.ts
+          tests/codex-runtime-model.test.ts
+      - name: Full suite
+        if: steps.patch.outputs.pending == 'true'
+        run: pnpm test
+      - name: Build
+        if: steps.patch.outputs.pending == 'true'
+        run: pnpm run build
+      - name: Commit validated stabilization source
+        if: steps.patch.outputs.pending == 'true'
+        shell: bash
+        run: |
+          git diff --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'fix: harden runtime economics and dashboard calibration'
+          git push origin HEAD:${{ github.head_ref }}
