@@ -1,0 +1,34 @@
+diff --git a/tests/native-image-cap.test.ts b/tests/native-image-cap.test.ts
+index c9a1cf6..6c8fb18 100644
+--- a/tests/native-image-cap.test.ts
++++ b/tests/native-image-cap.test.ts
+@@ -180,12 +180,12 @@ describe('the cap is quantitative, not boolean', () => {
+ describe('wireImages — what the provider actually counts', () => {
+   beforeEach(() => resetSessionState());
+ 
+-  // The render counter and the wire disagree whenever the history collapse
+-  // absorbs a message that already carried one of our images: the message is
+-  // replaced wholesale, so the image inside it is never sent. Telemetry that
+-  // reads imageCount therefore over-reports, and any headroom math that trusts
+-  // it under-uses the budget.
+-  it('reports the outgoing body, not the render count, on a tool-heavy shape', async () => {
++  // History collapse must run before live tool-result imaging. Otherwise a
++  // tool_result can be rendered first and then absorbed wholesale by collapse,
++  // wasting the render and reducing its source to an image placeholder. The
++  // tool-heavy fixture below pins the fixed ordering: every image we render is
++  // still present on the outgoing wire.
++  it('does not render tool-result images that history collapse later discards', async () => {
+     const msgs: any[] = [{ role: 'user', content: 'ANCHOR ' + big(200) }];
+     for (let i = 0; i < 60; i++) {
+       msgs.push({ role: 'assistant', content: `turn ${i}: ` + big(4000) });
+@@ -201,8 +201,8 @@ describe('wireImages — what the provider actually counts', () => {
+ 
+     const actual = wireImages(dec(out).messages);
+     expect(info.wireImages).toBe(actual);
+-    // The whole point: we rendered materially more than we shipped.
+-    expect(info.imageCount!).toBeGreaterThan(actual);
++    // No speculative/discarded render remains after collapse.
++    expect(info.imageCount).toBe(actual);
+     expect(actual).toBeLessThanOrEqual(ANTHROPIC_MAX_IMAGES);
+   });
+ 
