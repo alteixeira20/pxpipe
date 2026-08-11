@@ -2024,6 +2024,19 @@ export function createProxy(config: ProxyConfig = {}) {
 
     applyGatewayHeaders(outHeaders);
 
+    // Claude Code embeds a volatile x-anthropic-billing-header line in system
+    // text. transform.ts removes it from the prompt so cc_prev_req cannot churn
+    // the prompt-cache key; send it upstream as the transport header it names.
+    if (info?.billingLine) {
+      const sep = info.billingLine.indexOf(':');
+      if (sep > 0) {
+        outHeaders.set(
+          info.billingLine.slice(0, sep).trim().toLowerCase(),
+          info.billingLine.slice(sep + 1).trim(),
+        );
+      }
+    }
+
     let upstreamUrl: string;
     // Gateway OpenAI routes drop the `/v1` prefix; provider-prefixed passthrough
     // routes keep their full path so ocproxy-style upstreams see `/openai/*`,

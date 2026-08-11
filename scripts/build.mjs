@@ -3,6 +3,7 @@ import { mkdir, readFile, rm } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
+import path from 'node:path';
 
 const require = createRequire(import.meta.url);
 const pkg = JSON.parse(
@@ -17,7 +18,9 @@ if (existsSync(OUT)) {
 
 await mkdir(OUT, { recursive: true });
 
-const tscBin = require.resolve('typescript/bin/tsc');
+const tsPkgPath = require.resolve('typescript/package.json');
+const tsPkg = require('typescript/package.json');
+const tscBin = path.resolve(path.dirname(tsPkgPath), tsPkg.bin.tsc);
 const tsc = spawnSync(process.execPath, [tscBin, '-p', 'tsconfig.json'], {
   stdio: 'inherit',
 });
@@ -36,7 +39,7 @@ console.log('✓ emitted dist/ library modules + declarations');
 const sharedBuild = {
   bundle: true,
   platform: 'node',
-  target: 'node18',
+  target: 'node20',
   format: 'esm',
   sourcemap: true,
   define: {
