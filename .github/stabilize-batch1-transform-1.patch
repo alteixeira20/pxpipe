@@ -14,7 +14,10 @@ index 3702e93..4e869d4 100644
 +  maxImageBytes?: number;
 +  /** Chars-per-token assumption for `isCompressionProfitable()`. Default 3. */
    charsPerToken?: number;
+   /** Multi-turn amortization horizon for the history-collapse gate. N≥2 evaluates as
+    *  if N future turns share the prefix (worst-case-warm-image vs best-case-warm-text).
 @@ -167,7 +172,11 @@ const DEFAULTS: Required<TransformOptions> = {
+   // 312 cols × 5 px + 8 px pad = 1568 px (Anthropic no-resize edge).
    cols: ANTHROPIC_SLAB_COLS,
    maxImagesPerToolResult: 10,
 -  charsPerToken: 4,
@@ -23,21 +26,35 @@ index 3702e93..4e869d4 100644
 +  // Production JSON/log traffic measured materially denser than English prose;
 +  // 3 keeps a conservative margin while avoiding the old 4 ch/tok underpricing.
 +  charsPerToken: 3,
+   historyAmortizationHorizon: 1,
+   priorWarmTokens: 0,
+   priorWarmImageTokens: 0,
 @@ -225,16 +234,17 @@ const OAUTH_IDENTITIES = [
+ //
+ // Image token cost is the serving model's DOCUMENTED per-image price, taken
+ // from its profile via `visionTokens` (src/core/vision-cost.ts) — never a
 -// hardcoded provider formula. Constants bias CONSERVATIVE: CHARS_PER_TOKEN=4
 -// under-estimates text savings; the gate multiplies the image cost by
 +// hardcoded provider formula. Constants bias CONSERVATIVE: CHARS_PER_TOKEN=3
 +// stays above the production-fit density and under-estimates text savings; the gate multiplies the image cost by
-@@
+ // GATE_MARGIN on top. Mispredictions leave money on the table; they never
+ // generate net-loss images.
+ 
 -/** English ~4 chars per token average (conservative for code/JSON content). */
 -const CHARS_PER_TOKEN = 4;
 +/** Production mixed JSON/log traffic fits around ~2.3 chars/token; 3 keeps a
 + * conservative margin while avoiding the old English-prose default of 4. */
 +const CHARS_PER_TOKEN = 3;
-@@
+ 
+ /** Empirical cpt for the system-slab path (Opus 4.7 tokenizer, N=391, observed 1.91).
 - *  Slab-specific because reminders/tool_results have unknown shape; those stay at 4. */
 + *  Slab-specific because reminders/tool_results have mixed shape; those use the conservative generic rate. */
+ export const SLAB_CHARS_PER_TOKEN = 2.0;
+ 
+ // Tools whose stub description keeps a live-text read-before-edit precondition
 @@ -717,8 +727,14 @@ export interface TransformInfo {
+    *  whose own images already fill the cap must not get a single one from us.
+    *  Counted once, before any rewrite. See {@link imageHeadroom}. */
    nativeImages?: number;
 -  /** Imaging steps skipped because the cap was exhausted (telemetry for tuning). */
 +  /** Decoded bytes of the CLIENT's own image blocks, counted before any rewrite. */
@@ -48,11 +65,19 @@ index 3702e93..4e869d4 100644
 +  imageByteSkips?: number;
 +  /** True when total decoded image bytes landed within the top 10% of the budget. */
 +  imageBytesNearLimit?: boolean;
+   /** Image blocks actually present in the outgoing body — ours AND the client's.
+    *  This is the only number the provider counts. It is <= imageCount + nativeImages
+    *  because the history collapse can absorb messages that already carried images. */
 @@ -809,6 +825,7 @@ export interface TransformInfo {
+     | 'below_min_tokens'
      | 'not_profitable'
      | 'too_many_images'
 +    | 'image_bytes'
+     | 'render_empty'
+     | 'over_budget'
+     | 'render_lossy'
 @@ -1842,6 +1859,35 @@ export function imageHeadroom(info: TransformInfo): number {
+   );
  }
  
 +/** Bytes still available for image content after caller-provided images. */
@@ -84,18 +109,40 @@ index 3702e93..4e869d4 100644
 +  return bytes;
 +}
 +
+ /** Count image blocks already present in the caller's messages. Runs BEFORE any
+  *  rewrite, so it sees the client's images only — ours do not exist yet. */
+ export function countNativeImages(messages: readonly Message[] | undefined): number {
 @@ -1958,6 +2004,10 @@ async function runHistoryCollapseAndFinalize(
+       for (const [cp, n] of histInfo.droppedCodepoints) {
+         droppedCodepoints.set(cp, (droppedCodepoints.get(cp) ?? 0) + n);
+       }
 +    } else if (histInfo.collapsedTurns > 0 && histInfo.collapsedImageBytes > imageByteHeadroom(info, o.maxImageBytes)) {
 +      bumpPassthrough(info, 'image_budget');
 +      info.imageByteSkips = (info.imageByteSkips ?? 0) + 1;
 +      info.historyReason = 'image_bytes';
+     } else if (histInfo.collapsedTurns > 0) {
+       req.messages = newMessages;
+       info.collapsedTurns = histInfo.collapsedTurns;
 @@ -1985,6 +2035,7 @@ async function runHistoryCollapseAndFinalize(
+     }
+   }
    applyPins(req, info, pins);
 +  if (nearImageByteLimit(info, o.maxImageBytes)) info.imageBytesNearLimit = true;
+   info.outgoingTextChars = countOutgoingTextChars(req);
+   // Ground truth, counted from the bytes we are about to send. `imageCount` is
+   // what we RENDERED, and the two differ: the collapse replaces whole messages,
 @@ -2061,6 +2112,7 @@ export async function transformRequest(
+   // same wire cap we are about to spend from. Counted once, here, because every
+   // later path (slab, tool_results, history) rewrites content in place.
    info.nativeImages = countNativeImages(req.messages);
 +  info.nativeImageBytes = countNativeImageBytes(req.messages);
+ 
+   // 0. User-pinned instructions. Fold the transcript's pin commands, then remove
+   //    them from the outbound copy — the client's own transcript is untouched, so
 @@ -2388,10 +2440,16 @@ export async function transformRequest(
+   // (measured: 94 client images + 400k slab -> 109 on the wire -> 400). All or
+   // nothing, because the slab is part of the cache prefix — imaging half of it
+   // would re-key that prefix on every turn whose client-image count moved.
 -  if (images.length > imageHeadroom(info)) {
 -    info.reason = `image_budget (slab needs ${images.length}, headroom ${imageHeadroom(info)})`;
 +  const slabBytes = images.reduce((sum, img) => sum + img.png.length, 0);
@@ -109,3 +156,6 @@ index 3702e93..4e869d4 100644
 -    info.imageBudgetSkips = (info.imageBudgetSkips ?? 0) + 1;
 +    if (slabOverBytes && !slabOverCount) info.imageByteSkips = (info.imageByteSkips ?? 0) + 1;
 +    else info.imageBudgetSkips = (info.imageBudgetSkips ?? 0) + 1;
+     const finalized = await runHistoryCollapseAndFinalize(req, info, o, opts, droppedCodepoints, pins);
+     if (finalized.collapsed) {
+       info.compressed = true;
