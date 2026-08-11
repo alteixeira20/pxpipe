@@ -21,7 +21,7 @@ jobs:
         name: Detect pending stabilization patch
         shell: bash
         run: |
-          if [[ -f .github/stabilization-final.patch.gz.b64 ]]; then
+          if [[ -f .github/stabilization-final.part00 ]]; then
             echo 'pending=true' >> "$GITHUB_OUTPUT"
           else
             echo 'pending=false' >> "$GITHUB_OUTPUT"
@@ -34,15 +34,15 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-      - name: Decode and apply exact source patch
+      - name: Reconstruct and apply exact source patch
         if: steps.patch.outputs.pending == 'true'
         shell: bash
         run: |
-          base64 -d .github/stabilization-final.patch.gz.b64 | gzip -d > /tmp/pxpipe-stabilization.patch
+          cat .github/stabilization-final.part* | base64 -d | gzip -d > /tmp/pxpipe-stabilization.patch
           echo '2c8aaf27638852f4fbcb0d5d17c501dc8f41688778d651a40964f90d1393fb75  /tmp/pxpipe-stabilization.patch' | sha256sum -c -
           git apply --check /tmp/pxpipe-stabilization.patch
           git apply /tmp/pxpipe-stabilization.patch
-          rm -f .github/stabilization-final.patch.gz.b64 .github/stabilize-batch1-*.patch
+          rm -f .github/stabilization-final.part* .github/stabilization-final.patch.gz.b64 .github/stabilize-batch1-*.patch
           git diff --check
       - name: Install frozen dependencies
         if: steps.patch.outputs.pending == 'true'
