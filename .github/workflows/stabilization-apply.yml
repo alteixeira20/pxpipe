@@ -42,7 +42,9 @@ jobs:
           echo '2c8aaf27638852f4fbcb0d5d17c501dc8f41688778d651a40964f90d1393fb75  /tmp/pxpipe-stabilization.patch' | sha256sum -c -
           git apply --check /tmp/pxpipe-stabilization.patch
           git apply /tmp/pxpipe-stabilization.patch
-          rm -f .github/stabilization-final.part* .github/stabilization-final.patch.gz.b64 .github/stabilize-batch1-*.patch
+          git apply --check .github/stabilization-followup.patch
+          git apply .github/stabilization-followup.patch
+          rm -f .github/stabilization-final.part* .github/stabilization-final.patch.gz.b64 .github/stabilization-followup.patch .github/stabilize-batch1-*.patch
           git diff --check
       - name: Install frozen dependencies
         if: steps.patch.outputs.pending == 'true'
@@ -60,6 +62,7 @@ jobs:
           tests/credential-route-policy.test.ts
           tests/request-body-limit.test.ts
           tests/image-byte-budget.test.ts
+          tests/native-image-cap.test.ts
           tests/economics.test.ts
           tests/cpt-fit.test.ts
           tests/adaptive-calibration.test.ts
