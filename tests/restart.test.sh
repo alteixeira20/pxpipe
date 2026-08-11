@@ -33,6 +33,7 @@ run_test() {
   local name="$1"; shift
   local sandbox; sandbox=$(mktemp -d)
   local logf="$sandbox/calls.log"
+  : > "$logf"
 
   # --- Build a fake PATH with mocked binaries that log their args ----------
   mkdir -p "$sandbox/bin"
@@ -179,10 +180,35 @@ test_rejects_unknown_args() {
   return 0
 }
 
+# ---- Test 8: a proxy from ANOTHER checkout is left alone ---------------
+test_foreign_checkout_is_untouched() {
+  local sandbox="$1" logf="$2"
+  echo "4242" > "$sandbox/pids"
+  : > "$sandbox/lsof_pid"
+  local out="$sandbox/out.txt"
+  ( cd "$REPO" && "$SCRIPT" --no-build >"$out" 2>&1 || true )
+  grep -q "no pxpipe proxy of this checkout" "$out" || return 1
+  grep -q "found running pxpipe proxy" "$out" && return 1
+  return 0
+}
+
+# ---- Test 9: the proxy holding OUR port is still found -----------------
+test_owned_proxy_is_found() {
+  local sandbox="$1" logf="$2"
+  echo "4242" > "$sandbox/pids"
+  echo "4242" > "$sandbox/lsof_pid"
+  local out="$sandbox/out.txt"
+  ( cd "$REPO" && "$SCRIPT" --no-build >"$out" 2>&1 || true )
+  grep -q "found running pxpipe proxy PID(s): 4242" "$out" || return 1
+  return 0
+}
+
 run_test "no proxy running"        test_no_running
 run_test "build failure aborts"    test_build_failure
 run_test "port-in-use aborts"      test_port_in_use
 run_test "rejects unknown args"    test_rejects_unknown_args
+run_test "foreign checkout untouched" test_foreign_checkout_is_untouched
+run_test "owned proxy is found"    test_owned_proxy_is_found
 
 echo ""
 echo "$PASS passed, $FAIL failed"
