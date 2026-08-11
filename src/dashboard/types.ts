@@ -1,5 +1,7 @@
 // JSON payload shapes for the dashboard. Single source of truth — update here when src/dashboard.ts changes.
 
+import type { CalibrationSnapshot } from '../core/adaptive-calibration.js';
+
 /** /proxy-stats payload. */
 export interface StatsPayload {
   port: number;
@@ -44,6 +46,8 @@ export interface StatsPayload {
   events_with_measurement: number;
   uptime_sec_unused?: never; // future-proof
   compression_enabled: boolean;
+  /** Passive model-specific economics calibration. Shadow-only; never weakens safety policy. */
+  calibration: CalibrationSnapshot[];
 }
 
 export interface PricingAssumptions {

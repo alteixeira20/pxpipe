@@ -1111,7 +1111,85 @@ export async function renderTextToPngsReflow(
 }
 
 /** Split text into N PNGs each ≤ MAX_HEIGHT_PX tall, respecting per-image char budget. */
+// Rendering is a pure function of these arguments. Frozen history chunks are
+// intentionally byte-stable across turns, so re-rasterizing them burns CPU for
+// identical PNGs. Keep a byte-bounded LRU of rendered pages; 0 disables it.
+const RENDER_CACHE_MAX_BYTES = (() => {
+  const raw = typeof process !== 'undefined' ? process.env?.PXPIPE_RENDER_CACHE_BYTES : undefined;
+  const parsed = raw !== undefined && raw.trim() !== '' ? Number(raw) : NaN;
+  if (Number.isFinite(parsed) && parsed >= 0) return Math.floor(parsed);
+  return 64 * 1024 * 1024;
+})();
+
+interface RenderCacheEntry {
+  images: readonly RenderedImage[];
+  bytes: number;
+}
+const renderCache = new Map<string, RenderCacheEntry>();
+let renderCacheBytes = 0;
+let renderCacheHits = 0;
+let renderCacheMisses = 0;
+
+export function renderCacheStats(): { entries: number; bytes: number; hits: number; misses: number } {
+  return { entries: renderCache.size, bytes: renderCacheBytes, hits: renderCacheHits, misses: renderCacheMisses };
+}
+
+export function clearRenderCache(): void {
+  renderCache.clear();
+  renderCacheBytes = 0;
+  renderCacheHits = 0;
+  renderCacheMisses = 0;
+}
+
+function renderStyleKey(style: RenderStyle): string {
+  return Object.keys(style)
+    .sort()
+    .map((key) => `${key}=${String((style as Record<string, unknown>)[key])}`)
+    .join(';');
+}
+
+function cloneRenderedImages(images: readonly RenderedImage[]): RenderedImage[] {
+  return images.map((image) => ({ ...image, droppedCodepoints: new Map(image.droppedCodepoints) }));
+}
+
 export async function renderTextToPngsWithCharLimit(
+  text: string,
+  cols: number = DEFAULT_COLS,
+  maxCharsPerImage: number = READABLE_CHARS_PER_IMAGE,
+  style: RenderStyle = {},
+  maxHeightPx: number = MAX_HEIGHT_PX,
+  slotText?: string,
+): Promise<RenderedImage[]> {
+  if (RENDER_CACHE_MAX_BYTES === 0) {
+    return renderTextToPngsWithCharLimitUncached(text, cols, maxCharsPerImage, style, maxHeightPx, slotText);
+  }
+  const slotLen = slotText === undefined ? -1 : slotText.length;
+  const key = `${cols}|${maxCharsPerImage}|${maxHeightPx}|${renderStyleKey(style)}|${slotLen}|${slotText ?? ''}|${text}`;
+  const hit = renderCache.get(key);
+  if (hit) {
+    renderCacheHits += 1;
+    renderCache.delete(key);
+    renderCache.set(key, hit);
+    return cloneRenderedImages(hit.images);
+  }
+  renderCacheMisses += 1;
+  const images = await renderTextToPngsWithCharLimitUncached(text, cols, maxCharsPerImage, style, maxHeightPx, slotText);
+  let bytes = key.length * 2;
+  for (const image of images) bytes += image.png.byteLength;
+  if (bytes <= RENDER_CACHE_MAX_BYTES) {
+    renderCache.set(key, { images, bytes });
+    renderCacheBytes += bytes;
+    while (renderCacheBytes > RENDER_CACHE_MAX_BYTES && renderCache.size > 1) {
+      const oldest = renderCache.entries().next().value as [string, RenderCacheEntry] | undefined;
+      if (!oldest) break;
+      renderCache.delete(oldest[0]);
+      renderCacheBytes -= oldest[1].bytes;
+    }
+  }
+  return cloneRenderedImages(images);
+}
+
+async function renderTextToPngsWithCharLimitUncached(
   text: string,
   cols: number = DEFAULT_COLS,
   maxCharsPerImage: number = READABLE_CHARS_PER_IMAGE,

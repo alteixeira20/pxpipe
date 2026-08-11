@@ -56,10 +56,10 @@ export function renderToggleFragment(enabled: boolean): string {
   // NOTE: "PASSTHROUGH MODE", "Disable compression", "Enable compression" are asserted by tests.
   const banner = enabled
     ? ''
-    : `<div class="banner"><strong>PASSTHROUGH MODE</strong> — compression is off. Every request goes to Claude unchanged: no images, no savings. Use this to A/B test, or if the upstream API is having problems.</div>`;
+    : `<div class="banner"><strong>PASSTHROUGH MODE</strong> — compression is off. Every eligible model request passes through unchanged: no PXPipe images, no compression savings. Use this to A/B test, or if the upstream API is having problems.</div>`;
   // Button POSTs the OPPOSITE of current state; 2s poll keeps it fresh.
   const confirm = enabled
-    ? ` hx-confirm="Turn compression off?\n\nRequests will pass straight through to Claude, unchanged. Restarting the proxy turns it back on."`
+    ? ` hx-confirm="Turn compression off?\n\nEligible model requests will pass through unchanged. Restarting the proxy turns it back on."`
     : '';
   return (
     banner +
@@ -194,7 +194,7 @@ export function renderSessionSummaryFragment(s: StatsPayload): string {
       `<div class="hero hero-empty">` +
       `<div class="hero-eyebrow">Since start</div>` +
       `<div class="hero-headline">Warming up…</div>` +
-      `<div class="hero-sub">Point Claude Code at this proxy with <code>ANTHROPIC_BASE_URL</code>, or launch it with <code>pxpipe warp -- claude</code> to keep <code>/remote-control</code> and claude.ai connectors working. Send a message and your running savings show up right here.</div>` +
+      `<div class="hero-sub">Route a coding agent through PXPipe — for example <code>pxpipe codex</code>, <code>pxpipe agy</code>, or <code>pxpipe warp -- claude</code>. Provider-accounted usage and compression decisions will appear here after the first request.</div>` +
       `</div>`
     );
   }
@@ -851,6 +851,34 @@ export function renderSessionsFragment(p: SessionsPayload): string {
   );
 }
 
+
+// ---- passive model calibration -------------------------------------------
+
+export function renderCalibrationFragment(s: StatsPayload): string {
+  const rows = s.calibration ?? [];
+  if (rows.length === 0) {
+    return `<div class="empty-note">Collecting model-specific economics from normal traffic. No synthetic calibration calls are made.</div>`;
+  }
+  const body = rows.map((c) => {
+    const margin = c.observedMedianMarginPct == null ? '—' : `${c.observedMedianMarginPct.toFixed(1)}%`;
+    const p10 = c.observedP10MarginPct == null ? '—' : `${c.observedP10MarginPct.toFixed(1)}%`;
+    const floor = c.shadowMinBaselineTokens == null ? '—' : numFmt(c.shadowMinBaselineTokens);
+    const learned = Object.entries(c.cpt ?? {})
+      .map(([bucket, value]) => `${bucket}=${Number(value).toFixed(2)}`)
+      .join(', ') || '—';
+    return `<tr>` +
+      `<td><strong>${escapeHtml(c.model)}</strong><div class="muted">${escapeHtml(c.provider)}</div></td>` +
+      `<td>${escapeHtml(c.mode)}<div class="muted">${escapeHtml(c.confidence)}</div></td>` +
+      `<td class="num">${numFmt(c.counterfactualObservations)} / ${numFmt(c.observations)}</td>` +
+      `<td class="num">${margin}<div class="muted">p10 ${p10}</div></td>` +
+      `<td class="num">${floor}</td>` +
+      `<td><code>${escapeHtml(learned)}</code></td>` +
+      `</tr>`;
+  }).join('');
+  return `<div class="split-note"><strong>Shadow only.</strong> PXPipe learns from requests you were already making; it does not spend tokens on startup probes and it never relaxes semantic safety boundaries. Recommended floors/CPTs are diagnostics until controlled A/B evidence promotes them.</div>` +
+    `<table><thead><tr><th>Model</th><th>Calibration</th><th>Counterfactual / seen</th><th>Observed margin</th><th>Shadow floor (tok)</th><th>Learned CPT</th></tr></thead><tbody>${body}</tbody></table>`;
+}
+
 // ---- full-history stats table --------------------------------------------
 
 export function renderStatsTableFragment(p: FullStatsPayload): string {
@@ -1331,7 +1359,7 @@ export function renderPage(port: number, hostLabel = ''): string {
         <div class="wordmark">pxpipe</div>
         ${host ? `<span class="hostchip" title="proxy host">${host}</span>` : ''}
       </div>
-      <div class="tagline">See exactly what got turned into images to shrink your Claude Code bill.</div>
+      <div class="tagline">See what PXPipe transformed, why it did so, and whether it actually reduced model input.</div>
     </div>
   </div>
   <div class="controls">
@@ -1341,10 +1369,11 @@ export function renderPage(port: number, hostLabel = ''): string {
 </header>
 
 <details class="models-collapse">
-  <summary class="models-summary">Connect an agent <span class="hint">warp launches any CLI through this proxy · pin keeps instructions last in the request</span></summary>
-  <p>Warp starts the agent with the proxy already wired, no env or config edits:</p>
-  <pre>pxpipe warp -- claude
-pxpipe warp -- codex
+  <summary class="models-summary">Connect an agent <span class="hint">use the provider-native launcher when available · pin keeps instructions last in the request</span></summary>
+  <p>Use the dedicated launcher for integrations that need provider-specific routing; Warp remains available for ordinary proxy-compatible CLIs:</p>
+  <pre>pxpipe codex
+pxpipe agy
+pxpipe warp -- claude
 pxpipe warp -- cursor-agent</pre>
   <p>Aliases work too (<code>pxpipe warp -- pp</code>), and <code>--route PATTERN=http://host:port</code> adds routes beyond <code>api.anthropic.com</code> (a PATTERN that names a port matches only that port, e.g. <code>--route '127.0.0.1:8082/v1/*=http://127.0.0.1:${port}'</code> warps an agent pointed at another local proxy). Without warp, point the agent at <code>ANTHROPIC_BASE_URL=http://127.0.0.1:${port}</code> yourself.</p>
   <p>Pin instructions from inside the session — they get moved to the end of every request, where the model actually reads them:</p>
@@ -1356,8 +1385,8 @@ pxpipe warp -- cursor-agent</pre>
 </details>
 
 <details class="models-collapse">
-  <summary class="models-summary">Image model scope <span class="hint">Fable 5 and Gemini 3.6 Flash by default · expand to experiment with other families</span></summary>
-  <div class="models-warning">⚠ Image compression is validated for Fable 5 and Gemini 3.6 Flash — other families can use <strong>more</strong> tokens, not less. Opt in only for deliberate experiments.</div>
+  <summary class="models-summary">Image model scope <span class="hint">default requested scope: Fable 5 + Gemini 3.6 Flash · safe profile filters every opt-in through validated contracts</span></summary>
+  <div class="models-warning">Safe/balanced profiles currently validate the Claude 5 shared render contract, Gemini 3.6 Flash, and GPT 5.6 Sol. Only Fable 5 + Gemini are requested by default; other validated models still require an explicit opt-in. Unvalidated families remain text even if configured.</div>
   <div id="frag-models" hx-get="/fragments/models" hx-trigger="load, every 2s [!document.activeElement || document.activeElement.id !== 'models-csv']" hx-swap="innerHTML"></div>
   <div class="models-routing"><span class="hint">imaging scope ≠ provider routing — non-Anthropic IDs also need routing env on the proxy</span> <button class="mini-btn" type="button" onclick="document.getElementById('routing-help').showModal()">routing help</button></div>
 </details>
@@ -1387,6 +1416,13 @@ npx pxpipe-proxy</pre>
 </div>
 
 <div id="frag-header" hx-get="/fragments/header" hx-trigger="load, every 2s" hx-swap="innerHTML"></div>
+
+<section class="section">
+  <h2 class="section-head">Model economics calibration <span class="section-sub">passive · model-specific · shadow-only</span></h2>
+  <div class="card">
+    <div id="frag-calibration" hx-get="/fragments/calibration" hx-trigger="load, every 5s" hx-swap="innerHTML"></div>
+  </div>
+</section>
 
 <section class="section">
   <h2 class="section-head">What happened to your context <span class="section-sub">click a request to see image vs text</span></h2>

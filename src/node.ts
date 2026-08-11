@@ -82,6 +82,9 @@ interface RuntimeConfig {
   /** Persist 4xx request and upstream error bodies for debugging. Off unless
    *  PXPIPE_DEBUG_CAPTURE_4XX=1. */
   captureErrorReqBody: boolean;
+  /** Optional hard ceiling for inbound bodies buffered by transformable routes.
+   *  The core default is 16 MiB when unset. */
+  maxRequestBytes?: number;
 }
 
 const DEFAULT_CONFIG_FILE = path.join(os.homedir(), '.config', 'pxpipe', 'config.json');
@@ -158,6 +161,17 @@ function persistModelBasesToConfig(bases: readonly string[]): void {
   }
 }
 
+function parsePositiveIntegerEnv(name: string): number | undefined {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === '') return undefined;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    console.error(`[pxpipe] ${name} must be a positive safe integer (bytes), got: ${raw}`);
+    process.exit(2);
+  }
+  return value;
+}
+
 function parseCli(argv: string[]): RuntimeConfig {
   // Only flags accepted are --help and --version. Anything else is an
   // error — there is exactly ONE way to run pxpipe and the dashboard
@@ -214,6 +228,7 @@ function parseCli(argv: string[]): RuntimeConfig {
     // Off by default: either side of a 4xx may hold prompts or secrets.
     // Opt in for debugging only. (issue #69)
     captureErrorReqBody: process.env.PXPIPE_DEBUG_CAPTURE_4XX === '1',
+    maxRequestBytes: parsePositiveIntegerEnv('PXPIPE_MAX_REQUEST_BYTES'),
   };
 }
 
@@ -1332,6 +1347,7 @@ async function main(): Promise<void> {
     openAIModels: opts.openAIModels,
     cloudflareModels: opts.cloudflareModels,
     captureErrorReqBody: opts.captureErrorReqBody,
+    maxRequestBytes: opts.maxRequestBytes,
     // Per-request transform options: dashboard/PXPIPE_DISABLE remain hard kill
     // switches; otherwise the selected semantic safety profile is applied.
     transform: () => {

@@ -53,6 +53,9 @@ export interface Env {
    *  attach your key to any stranger's request. Set with:
    *    npx wrangler secret put PXPIPE_WORKER_SECRET */
   PXPIPE_WORKER_SECRET?: string;
+  /** Optional inbound body ceiling in bytes. Invalid values fail closed to the
+   *  core default rather than disabling the bound. */
+  PXPIPE_MAX_REQUEST_BYTES?: string;
 }
 
 /** Compare SHA-256 digests instead of the raw strings so the comparison
@@ -165,6 +168,9 @@ export default {
       cloudflareApiKey: cfToken,
       openAIModels: parseModels(env.OPENAI_MODELS),
       cloudflareModels: parseModels(env.CLOUDFLARE_MODELS),
+      maxRequestBytes: env.PXPIPE_MAX_REQUEST_BYTES === undefined
+        ? undefined
+        : Number(env.PXPIPE_MAX_REQUEST_BYTES),
       transform,
       onRequest: (e) => {
         // Terse human-readable line (separate from the JSON event below;
