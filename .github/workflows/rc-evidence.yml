@@ -1,0 +1,53 @@
+name: RC evidence safety
+
+on:
+  push:
+    branches:
+      - stabilize/rc-evidence-safety-20260811
+  pull_request:
+    branches:
+      - stabilize/rc-runtime-parity-20260811
+
+permissions:
+  contents: write
+
+jobs:
+  apply-validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: stabilize/rc-evidence-safety-20260811
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          cache: pnpm
+      - name: Reconstruct and apply exact audited patches
+        run: |
+          cat .github/rc-safety/old.* | base64 -d | gzip -d > /tmp/safety.patch
+          echo '6b9b632dfc21c01040dc58cca8291daf83f81ff18ed367934a3fc8c660f8820d  /tmp/safety.patch' | sha256sum -c -
+          git apply --check /tmp/safety.patch
+          git apply /tmp/safety.patch
+          cat .github/rc-safety/extra.* | base64 -d | gzip -d > /tmp/extra.patch
+          echo '69389ddecb58949922f08a5d5c5dfa6e2e32dda1d50e72079c100460646ccd29  /tmp/extra.patch' | sha256sum -c -
+          git apply --check --exclude=tests/history-geometry.test.ts /tmp/extra.patch
+          git apply --exclude=tests/history-geometry.test.ts /tmp/extra.patch
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run audit
+      - run: pnpm run typecheck
+      - name: Focused evidence regressions
+        run: pnpm vitest run tests/coding-safe-model-scope.test.ts tests/history-geometry.test.ts tests/codex-economics.test.ts tests/codex-cli.test.ts tests/codex-runtime-model.test.ts tests/codex-readiness-contract.test.ts tests/safety-scope.test.ts
+      - run: pnpm test
+      - run: pnpm run build
+      - run: git diff --check
+      - name: Commit validated product source
+        if: github.event_name == 'push'
+        run: |
+          git add src tests
+          git diff --cached --check
+          git config user.name 'pxpipe-rc-bot'
+          git config user.email 'pxpipe-rc-bot@users.noreply.github.com'
+          git commit -m 'fix(rc): make model safety evidence-gated'
+          git push origin HEAD:stabilize/rc-evidence-safety-20260811
