@@ -34,6 +34,12 @@ jobs:
           echo 'dec97e2b0e4ccb53042fa6277c9008f9d2536f4076f89166dfad969938608a1b  /tmp/ts7.patch' | sha256sum -c -
           git apply --check /tmp/ts7.patch
           git apply /tmp/ts7.patch
+      - name: Reconstruct exact HEAD and billing regression patch
+        run: |
+          cat .github/rc/headfix.part* | base64 -d > /tmp/headfix.patch
+          echo '4d047e223718490671685c45ae259f1f40402dfa4cfd3f5d6efd289d4fdc5cae  /tmp/headfix.patch' | sha256sum -c -
+          git apply --check /tmp/headfix.patch
+          git apply /tmp/headfix.patch
       - name: Refresh dependency lock
         run: |
           pnpm install --no-frozen-lockfile
@@ -41,7 +47,7 @@ jobs:
       - run: pnpm run audit
       - run: pnpm run typecheck
       - name: Focused runtime regressions
-        run: pnpm vitest run tests/runtime-parity.test.ts tests/codex-runtime-model.test.ts tests/request-body-limit.test.ts tests/image-byte-budget.test.ts
+        run: pnpm vitest run tests/runtime-parity.test.ts tests/render.test.ts tests/codex-runtime-model.test.ts tests/request-body-limit.test.ts tests/image-byte-budget.test.ts
       - run: pnpm test
       - run: pnpm run test:restart
       - run: pnpm run build
@@ -57,7 +63,8 @@ jobs:
           pid=$!
           trap 'kill $pid 2>/dev/null || true' EXIT
           for i in $(seq 1 40); do curl -fsS http://127.0.0.1:47991/ >/dev/null && break; sleep .25; done
-          curl -fsSI http://127.0.0.1:47991/ | grep -q '200 OK'
+          curl -fsSI http://127.0.0.1:47991/ | tee /tmp/head.out
+          grep -q '200 OK' /tmp/head.out
       - run: pnpm exec wrangler deploy --dry-run
       - run: git diff --check
       - name: Commit validated source
