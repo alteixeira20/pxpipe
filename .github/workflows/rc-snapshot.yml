@@ -1,9 +1,9 @@
 name: RC promote validated runtime
 
 on:
-  push:
+  pull_request:
     branches:
-      - stabilize/rc-runtime-parity-20260811
+      - main
 
 permissions:
   contents: write
@@ -14,12 +14,14 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: stabilize/rc-runtime-parity-20260811
       - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '24'
           cache: pnpm
-      - name: Apply already-validated runtime patches
+      - name: Apply already-validated runtime source
         run: |
           cat .github/rc/runtime.part* | base64 -d > /tmp/runtime.patch
           echo '4501be8f67e193c1d1fc723f4aeb0e089d9eb775d653b38fd3463bc46d62a7d0  /tmp/runtime.patch' | sha256sum -c -
@@ -48,7 +50,7 @@ jobs:
           assert old in s
           p.write_text(s.replace(old, new))
           PY
-      - name: Refresh lock and promote clean diff
+      - name: Promote product-only commit
         run: |
           pnpm install --no-frozen-lockfile
           rm -rf .github/rc .github/workflows/rc-snapshot.yml
