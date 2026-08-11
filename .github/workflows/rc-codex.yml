@@ -54,6 +54,21 @@ jobs:
           git apply --3way --check /tmp/codex-feature.patch
           git apply --3way /tmp/codex-feature.patch
           git diff --check
+      - name: Apply audited type-contract correction
+        if: steps.gate.outputs.run == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('src/core/transform.ts')
+          text = path.read_text()
+          needle = '  historyAmortizationHorizon: 1,\n  priorWarmTokens: 0,'
+          replacement = '  historyAmortizationHorizon: 1,\n  codexOptimization: false,\n  priorWarmTokens: 0,'
+          assert text.count(needle) == 1, 'unexpected TransformOptions DEFAULTS shape'
+          path.write_text(text.replace(needle, replacement))
+          PY
+          git diff --check
       - name: Install
         if: steps.gate.outputs.run == 'true'
         run: pnpm install --frozen-lockfile
