@@ -1,0 +1,250 @@
+diff --git a/src/core/tracker.ts b/src/core/tracker.ts
+index 93b705e..29edfc1 100644
+--- a/src/core/tracker.ts
++++ b/src/core/tracker.ts
+@@ -35,6 +35,12 @@ export interface TrackEvent {
+    *  here plus a fat request means the client's own images crowded us out — the
+    *  request stayed valid, but the token win was skipped. */
+   image_budget_skips?: number;
++  /** Decoded bytes of caller-provided images occupying the same request budget. */
++  native_image_bytes?: number;
++  /** Imaging groups kept as text because the decoded-byte budget was exhausted. */
++  image_byte_skips?: number;
++  /** Request finished inside the top 10% of its configured image-byte budget. */
++  image_bytes_near_limit?: boolean;
+   /** Image blocks really on the wire. Present only when it differs from
+    *  image_count + native_images — i.e. when the history collapse absorbed
+    *  messages that already carried images, so we rendered more than we sent. */
+@@ -298,7 +304,10 @@ export function toTrackEvent(ev: ProxyEvent): TrackEvent {
+     // Only when nonzero: a wire without client images is the common case and
+     // should not pay a key per event.
+     if ((info.nativeImages ?? 0) > 0) out.native_images = info.nativeImages;
++    if ((info.nativeImageBytes ?? 0) > 0) out.native_image_bytes = info.nativeImageBytes;
+     if ((info.imageBudgetSkips ?? 0) > 0) out.image_budget_skips = info.imageBudgetSkips;
++    if ((info.imageByteSkips ?? 0) > 0) out.image_byte_skips = info.imageByteSkips;
++    if (info.imageBytesNearLimit === true) out.image_bytes_near_limit = true;
+     // Emit only when it disagrees with the render counter: equality is the common
+     // case and a per-event key for "nothing to see" is noise.
+     if (info.wireImages !== undefined
+diff --git a/src/node.ts b/src/node.ts
+index 582fa2a..b0640ea 100644
+--- a/src/node.ts
++++ b/src/node.ts
+@@ -82,6 +82,9 @@ interface RuntimeConfig {
+   /** Persist 4xx request and upstream error bodies for debugging. Off unless
+    *  PXPIPE_DEBUG_CAPTURE_4XX=1. */
+   captureErrorReqBody: boolean;
++  /** Optional hard ceiling for inbound bodies buffered by transformable routes.
++   *  The core default is 16 MiB when unset. */
++  maxRequestBytes?: number;
+ }
+ 
+ const DEFAULT_CONFIG_FILE = path.join(os.homedir(), '.config', 'pxpipe', 'config.json');
+@@ -158,6 +161,17 @@ function persistModelBasesToConfig(bases: readonly string[]): void {
+   }
+ }
+ 
++function parsePositiveIntegerEnv(name: string): number | undefined {
++  const raw = process.env[name];
++  if (raw === undefined || raw.trim() === '') return undefined;
++  const value = Number(raw);
++  if (!Number.isSafeInteger(value) || value <= 0) {
++    console.error(`[pxpipe] ${name} must be a positive safe integer (bytes), got: ${raw}`);
++    process.exit(2);
++  }
++  return value;
++}
++
+ function parseCli(argv: string[]): RuntimeConfig {
+   // Only flags accepted are --help and --version. Anything else is an
+   // error — there is exactly ONE way to run pxpipe and the dashboard
+@@ -214,6 +228,7 @@ function parseCli(argv: string[]): RuntimeConfig {
+     // Off by default: either side of a 4xx may hold prompts or secrets.
+     // Opt in for debugging only. (issue #69)
+     captureErrorReqBody: process.env.PXPIPE_DEBUG_CAPTURE_4XX === '1',
++    maxRequestBytes: parsePositiveIntegerEnv('PXPIPE_MAX_REQUEST_BYTES'),
+   };
+ }
+ 
+@@ -1332,6 +1347,7 @@ async function main(): Promise<void> {
+     openAIModels: opts.openAIModels,
+     cloudflareModels: opts.cloudflareModels,
+     captureErrorReqBody: opts.captureErrorReqBody,
++    maxRequestBytes: opts.maxRequestBytes,
+     // Per-request transform options: dashboard/PXPIPE_DISABLE remain hard kill
+     // switches; otherwise the selected semantic safety profile is applied.
+     transform: () => {
+diff --git a/src/worker.ts b/src/worker.ts
+index 4989240..173dc1f 100644
+--- a/src/worker.ts
++++ b/src/worker.ts
+@@ -53,6 +53,9 @@ export interface Env {
+    *  attach your key to any stranger's request. Set with:
+    *    npx wrangler secret put PXPIPE_WORKER_SECRET */
+   PXPIPE_WORKER_SECRET?: string;
++  /** Optional inbound body ceiling in bytes. Invalid values fail closed to the
++   *  core default rather than disabling the bound. */
++  PXPIPE_MAX_REQUEST_BYTES?: string;
+ }
+ 
+ /** Compare SHA-256 digests instead of the raw strings so the comparison
+@@ -165,6 +168,9 @@ export default {
+       cloudflareApiKey: cfToken,
+       openAIModels: parseModels(env.OPENAI_MODELS),
+       cloudflareModels: parseModels(env.CLOUDFLARE_MODELS),
++      maxRequestBytes: env.PXPIPE_MAX_REQUEST_BYTES === undefined
++        ? undefined
++        : Number(env.PXPIPE_MAX_REQUEST_BYTES),
+       transform,
+       onRequest: (e) => {
+         // Terse human-readable line (separate from the JSON event below;
+diff --git a/tests/credential-route-policy.test.ts b/tests/credential-route-policy.test.ts
+new file mode 100644
+index 0000000..664cdb8
+--- /dev/null
++++ b/tests/credential-route-policy.test.ts
+@@ -0,0 +1,74 @@
++import { afterEach, describe, expect, it } from 'vitest';
++import {
++  classifyInboundCredential,
++  createProxy,
++  resolveOpenAIRouteAuth,
++  type InboundCredential,
++} from '../src/core/proxy.js';
++
++const JWT = 'eyJhbGciOiJub25lIn0.eyJzdWIiOiJ0ZXN0In0.c2ln';
++const HOST_KEY = 'sk-host-configured';
++let restoreFetch: (() => void) | undefined;
++afterEach(() => { restoreFetch?.(); restoreFetch = undefined; });
++
++function mockUpstream(assertion: (req: Request) => void): void {
++  const real = globalThis.fetch;
++  globalThis.fetch = (async (input: Request | string | URL, init?: RequestInit) => {
++    const req = input instanceof Request ? input : new Request(String(input), init);
++    assertion(req);
++    return new Response(JSON.stringify({ id: 'resp_1', output: [], usage: { input_tokens: 1, output_tokens: 1 } }), {
++      status: 200,
++      headers: { 'content-type': 'application/json' },
++    });
++  }) as typeof fetch;
++  restoreFetch = () => { globalThis.fetch = real; };
++}
++
++describe('OpenAI route credential policy', () => {
++  const matrix: Array<[InboundCredential, boolean, 'keep-inbound' | 'replace' | 'drop']> = [
++    ['none', false, 'drop'], ['none', true, 'replace'],
++    ['anthropic-key', false, 'drop'], ['anthropic-key', true, 'replace'],
++    ['anthropic-bearer', false, 'drop'], ['anthropic-bearer', true, 'replace'],
++    ['oauth-jwt', false, 'keep-inbound'], ['oauth-jwt', true, 'keep-inbound'],
++    ['api-key-bearer', false, 'keep-inbound'], ['api-key-bearer', true, 'replace'],
++    ['opaque-bearer', false, 'keep-inbound'], ['opaque-bearer', true, 'replace'],
++  ];
++
++  it.each(matrix)('%s / configured=%s => %s', (kind, configured, expected) => {
++    expect(resolveOpenAIRouteAuth(kind, configured).action).toBe(expected);
++  });
++
++  it('classifies credentials by shape without reading a token store', () => {
++    expect(classifyInboundCredential(new Headers())).toBe('none');
++    expect(classifyInboundCredential(new Headers({ 'x-api-key': 'sk-ant-api03-x' }))).toBe('anthropic-key');
++    expect(classifyInboundCredential(new Headers({ authorization: 'Bearer sk-ant-oat01-x' }))).toBe('anthropic-bearer');
++    expect(classifyInboundCredential(new Headers({ authorization: `Bearer ${JWT}` }))).toBe('oauth-jwt');
++    expect(classifyInboundCredential(new Headers({ authorization: 'Bearer sk-proj-x' }))).toBe('api-key-bearer');
++  });
++
++  it('preserves caller subscription OAuth even when a host OpenAI key exists', async () => {
++    mockUpstream((req) => expect(req.headers.get('authorization')).toBe(`Bearer ${JWT}`));
++    const proxy = createProxy({
++      openAIUpstream: 'https://openai.test',
++      openAIApiKey: HOST_KEY,
++      transform: { compress: false },
++    });
++    const res = await proxy(new Request('http://pxpipe/v1/responses', {
++      method: 'POST',
++      headers: { 'content-type': 'application/json', authorization: `Bearer ${JWT}` },
++      body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'hi' }),
++    }));
++    expect(res.status).toBe(200);
++  });
++
++  it('never forwards an Anthropic-shaped bearer to an OpenAI upstream', async () => {
++    mockUpstream((req) => expect(req.headers.has('authorization')).toBe(false));
++    const proxy = createProxy({ openAIUpstream: 'https://openai.test', transform: { compress: false } });
++    const res = await proxy(new Request('http://pxpipe/v1/responses', {
++      method: 'POST',
++      headers: { 'content-type': 'application/json', authorization: 'Bearer sk-ant-oat01-secret' },
++      body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'hi' }),
++    }));
++    expect(res.status).toBe(200);
++  });
++});
+diff --git a/tests/request-body-limit.test.ts b/tests/request-body-limit.test.ts
+new file mode 100644
+index 0000000..1109d2d
+--- /dev/null
++++ b/tests/request-body-limit.test.ts
+@@ -0,0 +1,64 @@
++import { afterEach, describe, expect, it } from 'vitest';
++import { createProxy, DEFAULT_MAX_REQUEST_BYTES } from '../src/core/proxy.js';
++
++let restoreFetch: (() => void) | undefined;
++afterEach(() => { restoreFetch?.(); restoreFetch = undefined; });
++
++function mockUpstream(handler: (req: Request) => Promise<Response> | Response): void {
++  const real = globalThis.fetch;
++  globalThis.fetch = ((input: Request | string | URL, init?: RequestInit) => {
++    const req = input instanceof Request ? input : new Request(String(input), init);
++    return Promise.resolve(handler(req));
++  }) as typeof fetch;
++  restoreFetch = () => { globalThis.fetch = real; };
++}
++
++describe('bounded inbound request bodies', () => {
++  it('exports a finite conservative default', () => {
++    expect(DEFAULT_MAX_REQUEST_BYTES).toBe(16 * 1024 * 1024);
++  });
++
++  it('returns 413 before upstream when a transformable body exceeds the configured cap', async () => {
++    let upstreamCalls = 0;
++    mockUpstream(() => { upstreamCalls++; return new Response('{}'); });
++    const proxy = createProxy({ openAIUpstream: 'https://openai.test', maxRequestBytes: 32, transform: { compress: false } });
++    const body = JSON.stringify({ model: 'gpt-5.6-sol', input: 'x'.repeat(100) });
++    const res = await proxy(new Request('http://pxpipe/v1/responses', {
++      method: 'POST', headers: { 'content-type': 'application/json' }, body,
++    }));
++    expect(res.status).toBe(413);
++    expect(upstreamCalls).toBe(0);
++    expect(await res.json()).toMatchObject({ error: { type: 'request_too_large' } });
++  });
++
++  it('enforces the streamed size even without content-length', async () => {
++    let upstreamCalls = 0;
++    mockUpstream(() => { upstreamCalls++; return new Response('{}'); });
++    const proxy = createProxy({ openAIUpstream: 'https://openai.test', maxRequestBytes: 16, transform: { compress: false } });
++    const stream = new ReadableStream<Uint8Array>({
++      start(controller) {
++        controller.enqueue(new TextEncoder().encode('{"model":"gpt-5.6-sol","input":"'));
++        controller.enqueue(new TextEncoder().encode('xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}'));
++        controller.close();
++      },
++    });
++    const res = await proxy(new Request('http://pxpipe/v1/responses', {
++      method: 'POST', headers: { 'content-type': 'application/json' }, body: stream, duplex: 'half',
++    } as RequestInit & { duplex: 'half' }));
++    expect(res.status).toBe(413);
++    expect(upstreamCalls).toBe(0);
++  });
++
++  it('bounds model sniffing while preserving a label-only upload byte-for-byte', async () => {
++    const payload = new Uint8Array(128 * 1024).fill(65);
++    mockUpstream(async (req) => {
++      expect(new Uint8Array(await req.arrayBuffer())).toEqual(payload);
++      return new Response('ok', { status: 200 });
++    });
++    const proxy = createProxy({ maxRequestBytes: 1024 });
++    const res = await proxy(new Request('http://pxpipe/v1/files', {
++      method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: payload,
++    }));
++    expect(res.status).toBe(200);
++  });
++});
