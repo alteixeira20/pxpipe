@@ -22,16 +22,18 @@ jobs:
         with:
           node-version: '24'
           cache: pnpm
-      - name: Reconstruct exact patch
+      - name: Reconstruct exact runtime patch
         run: |
-          wc -c .github/rc/runtime.part*
-          sha256sum .github/rc/runtime.part*
           cat .github/rc/runtime.part* | base64 -d > /tmp/runtime.patch
-          wc -c /tmp/runtime.patch
-          sha256sum /tmp/runtime.patch
           echo '4501be8f67e193c1d1fc723f4aeb0e089d9eb775d653b38fd3463bc46d62a7d0  /tmp/runtime.patch' | sha256sum -c -
           git apply --check /tmp/runtime.patch
           git apply /tmp/runtime.patch
+      - name: Reconstruct exact TypeScript 7 compatibility patch
+        run: |
+          cat .github/rc/ts7.part* | base64 -d > /tmp/ts7.patch
+          echo 'dec97e2b0e4ccb53042fa6277c9008f9d2536f4076f89166dfad969938608a1b  /tmp/ts7.patch' | sha256sum -c -
+          git apply --check /tmp/ts7.patch
+          git apply /tmp/ts7.patch
       - name: Refresh dependency lock
         run: |
           pnpm install --no-frozen-lockfile
