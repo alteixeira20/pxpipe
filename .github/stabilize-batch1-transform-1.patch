@@ -1,0 +1,111 @@
+diff --git a/src/core/transform.ts b/src/core/transform.ts
+index 3702e93..4e869d4 100644
+--- a/src/core/transform.ts
++++ b/src/core/transform.ts
+@@ -100,7 +100,12 @@ export interface TransformOptions {
+   /** Hard upper bound on images per tool_result; source text truncated with a paging
+    *  marker above this to stay under Anthropic's 100-image/request cap. Default 10. */
+   maxImagesPerToolResult?: number;
+-  /** Chars-per-token assumption for `isCompressionProfitable()`. Default 4. */
++  /** Ceiling on total decoded image bytes in one request, caller images included.
++   *  The count cap alone is insufficient: production traffic becomes unreliable
++   *  near ~20 MiB even when the image count is legal. Semantic groups are admitted
++   *  atomically; a group that does not fit keeps its source text. */
++  maxImageBytes?: number;
++  /** Chars-per-token assumption for `isCompressionProfitable()`. Default 3. */
+   charsPerToken?: number;
+@@ -167,7 +172,11 @@ const DEFAULTS: Required<TransformOptions> = {
+   cols: ANTHROPIC_SLAB_COLS,
+   maxImagesPerToolResult: 10,
+-  charsPerToken: 4,
++  // Deliberately below the empirical ~20 MiB failure cliff.
++  maxImageBytes: 18 * 1024 * 1024,
++  // Production JSON/log traffic measured materially denser than English prose;
++  // 3 keeps a conservative margin while avoiding the old 4 ch/tok underpricing.
++  charsPerToken: 3,
+@@ -225,16 +234,17 @@ const OAUTH_IDENTITIES = [
+-// hardcoded provider formula. Constants bias CONSERVATIVE: CHARS_PER_TOKEN=4
+-// under-estimates text savings; the gate multiplies the image cost by
++// hardcoded provider formula. Constants bias CONSERVATIVE: CHARS_PER_TOKEN=3
++// stays above the production-fit density and under-estimates text savings; the gate multiplies the image cost by
+@@
+-/** English ~4 chars per token average (conservative for code/JSON content). */
+-const CHARS_PER_TOKEN = 4;
++/** Production mixed JSON/log traffic fits around ~2.3 chars/token; 3 keeps a
++ * conservative margin while avoiding the old English-prose default of 4. */
++const CHARS_PER_TOKEN = 3;
+@@
+- *  Slab-specific because reminders/tool_results have unknown shape; those stay at 4. */
++ *  Slab-specific because reminders/tool_results have mixed shape; those use the conservative generic rate. */
+@@ -717,8 +727,14 @@ export interface TransformInfo {
+   nativeImages?: number;
+-  /** Imaging steps skipped because the cap was exhausted (telemetry for tuning). */
++  /** Decoded bytes of the CLIENT's own image blocks, counted before any rewrite. */
++  nativeImageBytes?: number;
++  /** Imaging steps skipped because the count cap was exhausted. */
+   imageBudgetSkips?: number;
++  /** Imaging groups skipped because the decoded-byte budget was exhausted. */
++  imageByteSkips?: number;
++  /** True when total decoded image bytes landed within the top 10% of the budget. */
++  imageBytesNearLimit?: boolean;
+@@ -809,6 +825,7 @@ export interface TransformInfo {
+     | 'not_profitable'
+     | 'too_many_images'
++    | 'image_bytes'
+@@ -1842,6 +1859,35 @@ export function imageHeadroom(info: TransformInfo): number {
+ }
+ 
++/** Bytes still available for image content after caller-provided images. */
++export function imageByteHeadroom(info: TransformInfo, limit: number): number {
++  return Math.max(0, limit - info.imageBytes - (info.nativeImageBytes ?? 0));
++}
++
++function nearImageByteLimit(info: TransformInfo, limit: number): boolean {
++  return limit > 0 && info.imageBytes + (info.nativeImageBytes ?? 0) >= limit * 0.9;
++}
++
++/** Approximate decoded bytes of caller-provided image blocks, including images nested in tool results. */
++export function countNativeImageBytes(messages: readonly Message[] | undefined): number {
++  let bytes = 0;
++  const add = (blk: unknown): void => {
++    const b = blk as ImageBlock | null;
++    if (b?.type === 'image' && typeof b.source?.data === 'string') bytes += approxBlockBytes(b);
++  };
++  for (const m of messages ?? []) {
++    if (!Array.isArray(m.content)) continue;
++    for (const blk of m.content) {
++      add(blk);
++      const tr = blk as ToolResultBlock | null;
++      if (tr?.type === 'tool_result' && Array.isArray(tr.content)) {
++        for (const inner of tr.content) add(inner);
++      }
++    }
++  }
++  return bytes;
++}
++
+@@ -1958,6 +2004,10 @@ async function runHistoryCollapseAndFinalize(
++    } else if (histInfo.collapsedTurns > 0 && histInfo.collapsedImageBytes > imageByteHeadroom(info, o.maxImageBytes)) {
++      bumpPassthrough(info, 'image_budget');
++      info.imageByteSkips = (info.imageByteSkips ?? 0) + 1;
++      info.historyReason = 'image_bytes';
+@@ -1985,6 +2035,7 @@ async function runHistoryCollapseAndFinalize(
+   applyPins(req, info, pins);
++  if (nearImageByteLimit(info, o.maxImageBytes)) info.imageBytesNearLimit = true;
+@@ -2061,6 +2112,7 @@ export async function transformRequest(
+   info.nativeImages = countNativeImages(req.messages);
++  info.nativeImageBytes = countNativeImageBytes(req.messages);
+@@ -2388,10 +2440,16 @@ export async function transformRequest(
+-  if (images.length > imageHeadroom(info)) {
+-    info.reason = `image_budget (slab needs ${images.length}, headroom ${imageHeadroom(info)})`;
++  const slabBytes = images.reduce((sum, img) => sum + img.png.length, 0);
++  const slabOverCount = images.length > imageHeadroom(info);
++  const slabOverBytes = slabBytes > imageByteHeadroom(info, o.maxImageBytes);
++  if (slabOverCount || slabOverBytes) {
++    info.reason = slabOverCount
++      ? `image_budget (slab needs ${images.length}, headroom ${imageHeadroom(info)})`
++      : `image_bytes (slab needs ${slabBytes}, headroom ${imageByteHeadroom(info, o.maxImageBytes)})`;
+     bumpPassthrough(info, 'image_budget');
+-    info.imageBudgetSkips = (info.imageBudgetSkips ?? 0) + 1;
++    if (slabOverBytes && !slabOverCount) info.imageByteSkips = (info.imageByteSkips ?? 0) + 1;
++    else info.imageBudgetSkips = (info.imageBudgetSkips ?? 0) + 1;
