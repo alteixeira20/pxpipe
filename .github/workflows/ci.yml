@@ -39,4 +39,5 @@ jobs:
       - run: pnpm run audit
       - run: pnpm run typecheck
       - run: pnpm test
+      - run: pnpm run test:restart
       - run: pnpm run build
