@@ -1,9 +1,6 @@
 import { closeSync, openSync, readSync, statSync } from 'node:fs';
 
-import {
-  computeOpenAIActualInputEff,
-  computeOpenAIBaselineInputEff,
-} from './openai-savings.js';
+import { computeProviderEconomics } from './economics.js';
 import type { TrackEvent } from './tracker.js';
 
 export const CODEX_AB_MIN_PER_ARM = 10;
@@ -118,35 +115,28 @@ function eventEffective(event: TrackEvent): {
   haveUsage: boolean;
   haveCounterfactual: boolean;
 } {
-  const { input, cached, haveUsage } = eventUsage(event);
-  const imageTokens = isFiniteNumber(event.image_tokens) ? Math.max(0, event.image_tokens) : 0;
-  const baselineImaged = isFiniteNumber(event.baseline_imaged_tokens)
-    ? Math.max(0, event.baseline_imaged_tokens)
-    : 0;
-  const nativeInjected = isFiniteNumber(event.native_injected_tokens)
-    ? Math.max(0, event.native_injected_tokens)
-    : 0;
-  const haveCounterfactual = event.compressed === true && baselineImaged > 0 && imageTokens > 0;
-  if (!haveUsage) {
-    return { actual: 0, baseline: 0, saved: 0, haveUsage: false, haveCounterfactual };
-  }
-  const actual = computeOpenAIActualInputEff(input, cached, event.model);
-  const baseline = haveCounterfactual
-    ? computeOpenAIBaselineInputEff(
-        input,
-        cached,
-        imageTokens,
-        baselineImaged,
-        event.model,
-        nativeInjected,
-      )
-    : actual;
+  const { input, output, cached, haveUsage } = eventUsage(event);
+  const row = computeProviderEconomics({
+    provider: 'openai',
+    model: event.model,
+    compressed: event.compressed === true,
+    inputTokens: input,
+    outputTokens: output,
+    cachedTokens: cached,
+    imageTokens: isFiniteNumber(event.image_tokens) ? event.image_tokens : 0,
+    baselineImagedTokens: isFiniteNumber(event.baseline_imaged_tokens)
+      ? event.baseline_imaged_tokens
+      : 0,
+    nativeInjectedTokens: isFiniteNumber(event.native_injected_tokens)
+      ? event.native_injected_tokens
+      : 0,
+  });
   return {
-    actual,
-    baseline,
-    saved: baseline - actual,
-    haveUsage,
-    haveCounterfactual,
+    actual: row.actualInputEff,
+    baseline: row.baselineInputEff,
+    saved: row.effectiveSavedInput,
+    haveUsage: haveUsage && row.haveUsage,
+    haveCounterfactual: row.creditSaving,
   };
 }
 

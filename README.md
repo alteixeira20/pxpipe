@@ -324,7 +324,7 @@ The library defaults to the same coding-safe semantic policy and fails open by r
 
 ## Development and release gate
 
-Requirements: Node 18+ and pnpm 10.21.0.
+Requirements: Node 20.19+ and pnpm 10.21.0.
 
 ```bash
 corepack enable

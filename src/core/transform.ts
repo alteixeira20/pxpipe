@@ -100,7 +100,12 @@ export interface TransformOptions {
   /** Hard upper bound on images per tool_result; source text truncated with a paging
    *  marker above this to stay under Anthropic's 100-image/request cap. Default 10. */
   maxImagesPerToolResult?: number;
-  /** Chars-per-token assumption for `isCompressionProfitable()`. Default 4. */
+  /** Ceiling on total decoded image bytes in one request, caller images included.
+   *  The count cap alone is insufficient: production traffic becomes unreliable
+   *  near ~20 MiB even when the image count is legal. Semantic groups are admitted
+   *  atomically; a group that does not fit keeps its source text. */
+  maxImageBytes?: number;
+  /** Chars-per-token assumption for `isCompressionProfitable()`. Default 3. */
   charsPerToken?: number;
   /** Multi-turn amortization horizon for the history-collapse gate. N≥2 evaluates as
    *  if N future turns share the prefix (worst-case-warm-image vs best-case-warm-text).
@@ -167,7 +172,11 @@ const DEFAULTS: Required<TransformOptions> = {
   // 312 cols × 5 px + 8 px pad = 1568 px (Anthropic no-resize edge).
   cols: ANTHROPIC_SLAB_COLS,
   maxImagesPerToolResult: 10,
-  charsPerToken: 4,
+  // Deliberately below the empirical ~20 MiB failure cliff.
+  maxImageBytes: 18 * 1024 * 1024,
+  // Production JSON/log traffic measured materially denser than English prose;
+  // 3 keeps a conservative margin while avoiding the old 4 ch/tok underpricing.
+  charsPerToken: 3,
   historyAmortizationHorizon: 1,
   priorWarmTokens: 0,
   priorWarmImageTokens: 0,
@@ -225,16 +234,17 @@ const OAUTH_IDENTITIES = [
 //
 // Image token cost is the serving model's DOCUMENTED per-image price, taken
 // from its profile via `visionTokens` (src/core/vision-cost.ts) — never a
-// hardcoded provider formula. Constants bias CONSERVATIVE: CHARS_PER_TOKEN=4
-// under-estimates text savings; the gate multiplies the image cost by
+// hardcoded provider formula. Constants bias CONSERVATIVE: CHARS_PER_TOKEN=3
+// stays above the production-fit density and under-estimates text savings; the gate multiplies the image cost by
 // GATE_MARGIN on top. Mispredictions leave money on the table; they never
 // generate net-loss images.
 
-/** English ~4 chars per token average (conservative for code/JSON content). */
-const CHARS_PER_TOKEN = 4;
+/** Production mixed JSON/log traffic fits around ~2.3 chars/token; 3 keeps a
+ * conservative margin while avoiding the old English-prose default of 4. */
+const CHARS_PER_TOKEN = 3;
 
 /** Empirical cpt for the system-slab path (Opus 4.7 tokenizer, N=391, observed 1.91).
- *  Slab-specific because reminders/tool_results have unknown shape; those stay at 4. */
+ *  Slab-specific because reminders/tool_results have mixed shape; those use the conservative generic rate. */
 export const SLAB_CHARS_PER_TOKEN = 2.0;
 
 // Tools whose stub description keeps a live-text read-before-edit precondition
@@ -717,8 +727,14 @@ export interface TransformInfo {
    *  whose own images already fill the cap must not get a single one from us.
    *  Counted once, before any rewrite. See {@link imageHeadroom}. */
   nativeImages?: number;
-  /** Imaging steps skipped because the cap was exhausted (telemetry for tuning). */
+  /** Decoded bytes of the CLIENT's own image blocks, counted before any rewrite. */
+  nativeImageBytes?: number;
+  /** Imaging steps skipped because the count cap was exhausted. */
   imageBudgetSkips?: number;
+  /** Imaging groups skipped because the decoded-byte budget was exhausted. */
+  imageByteSkips?: number;
+  /** True when total decoded image bytes landed within the top 10% of the budget. */
+  imageBytesNearLimit?: boolean;
   /** Image blocks actually present in the outgoing body — ours AND the client's.
    *  This is the only number the provider counts. It is <= imageCount + nativeImages
    *  because the history collapse can absorb messages that already carried images. */
@@ -809,6 +825,7 @@ export interface TransformInfo {
     | 'below_min_tokens'
     | 'not_profitable'
     | 'too_many_images'
+    | 'image_bytes'
     | 'render_empty'
     | 'over_budget'
     | 'render_lossy'
@@ -1842,6 +1859,35 @@ export function imageHeadroom(info: TransformInfo): number {
   );
 }
 
+/** Bytes still available for image content after caller-provided images. */
+export function imageByteHeadroom(info: TransformInfo, limit: number): number {
+  return Math.max(0, limit - info.imageBytes - (info.nativeImageBytes ?? 0));
+}
+
+function nearImageByteLimit(info: TransformInfo, limit: number): boolean {
+  return limit > 0 && info.imageBytes + (info.nativeImageBytes ?? 0) >= limit * 0.9;
+}
+
+/** Approximate decoded bytes of caller-provided image blocks, including images nested in tool results. */
+export function countNativeImageBytes(messages: readonly Message[] | undefined): number {
+  let bytes = 0;
+  const add = (blk: unknown): void => {
+    const b = blk as ImageBlock | null;
+    if (b?.type === 'image' && typeof b.source?.data === 'string') bytes += approxBlockBytes(b);
+  };
+  for (const m of messages ?? []) {
+    if (!Array.isArray(m.content)) continue;
+    for (const blk of m.content) {
+      add(blk);
+      const tr = blk as ToolResultBlock | null;
+      if (tr?.type === 'tool_result' && Array.isArray(tr.content)) {
+        for (const inner of tr.content) add(inner);
+      }
+    }
+  }
+  return bytes;
+}
+
 /** Count image blocks already present in the caller's messages. Runs BEFORE any
  *  rewrite, so it sees the client's images only — ours do not exist yet. */
 export function countNativeImages(messages: readonly Message[] | undefined): number {
@@ -1958,6 +2004,10 @@ async function runHistoryCollapseAndFinalize(
       for (const [cp, n] of histInfo.droppedCodepoints) {
         droppedCodepoints.set(cp, (droppedCodepoints.get(cp) ?? 0) + n);
       }
+    } else if (histInfo.collapsedTurns > 0 && histInfo.collapsedImageBytes > imageByteHeadroom(info, o.maxImageBytes)) {
+      bumpPassthrough(info, 'image_budget');
+      info.imageByteSkips = (info.imageByteSkips ?? 0) + 1;
+      info.historyReason = 'image_bytes';
     } else if (histInfo.collapsedTurns > 0) {
       req.messages = newMessages;
       info.collapsedTurns = histInfo.collapsedTurns;
@@ -1985,6 +2035,7 @@ async function runHistoryCollapseAndFinalize(
     }
   }
   applyPins(req, info, pins);
+  if (nearImageByteLimit(info, o.maxImageBytes)) info.imageBytesNearLimit = true;
   info.outgoingTextChars = countOutgoingTextChars(req);
   // Ground truth, counted from the bytes we are about to send. `imageCount` is
   // what we RENDERED, and the two differ: the collapse replaces whole messages,
@@ -2061,6 +2112,7 @@ export async function transformRequest(
   // same wire cap we are about to spend from. Counted once, here, because every
   // later path (slab, tool_results, history) rewrites content in place.
   info.nativeImages = countNativeImages(req.messages);
+  info.nativeImageBytes = countNativeImageBytes(req.messages);
 
   // 0. User-pinned instructions. Fold the transcript's pin commands, then remove
   //    them from the outbound copy — the client's own transcript is untouched, so
@@ -2388,10 +2440,16 @@ export async function transformRequest(
   // (measured: 94 client images + 400k slab -> 109 on the wire -> 400). All or
   // nothing, because the slab is part of the cache prefix — imaging half of it
   // would re-key that prefix on every turn whose client-image count moved.
-  if (images.length > imageHeadroom(info)) {
-    info.reason = `image_budget (slab needs ${images.length}, headroom ${imageHeadroom(info)})`;
+  const slabBytes = images.reduce((sum, img) => sum + img.png.length, 0);
+  const slabOverCount = images.length > imageHeadroom(info);
+  const slabOverBytes = slabBytes > imageByteHeadroom(info, o.maxImageBytes);
+  if (slabOverCount || slabOverBytes) {
+    info.reason = slabOverCount
+      ? `image_budget (slab needs ${images.length}, headroom ${imageHeadroom(info)})`
+      : `image_bytes (slab needs ${slabBytes}, headroom ${imageByteHeadroom(info, o.maxImageBytes)})`;
     bumpPassthrough(info, 'image_budget');
-    info.imageBudgetSkips = (info.imageBudgetSkips ?? 0) + 1;
+    if (slabOverBytes && !slabOverCount) info.imageByteSkips = (info.imageByteSkips ?? 0) + 1;
+    else info.imageBudgetSkips = (info.imageBudgetSkips ?? 0) + 1;
     const finalized = await runHistoryCollapseAndFinalize(req, info, o, opts, droppedCodepoints, pins);
     if (finalized.collapsed) {
       info.compressed = true;
@@ -2484,258 +2542,11 @@ export async function transformRequest(
       ];
     }
 
-    // 5b. Compress tool_result content across ALL user messages.
-    if (o.compressToolResults) {
-      for (const msg of req.messages ?? []) {
-        if (msg.role !== 'user' || !Array.isArray(msg.content)) continue;
-        const rewritten: ContentBlock[] = [];
-        let changed = false;
-        for (const blk of msg.content) {
-          if (blk && (blk as ToolResultBlock).type === 'tool_result') {
-            const tr = blk as ToolResultBlock;
-            // Anthropic rejects images inside is_error tool_results — leave alone.
-            if (tr.is_error === true) {
-              rewritten.push(blk);
-              continue;
-            }
-            const innerRaw = tr.content;
-            if (typeof innerRaw === 'string') {
-              // Caller fidelity override: pin this tool_result as text.
-              if (callerKeepsSharp(o.keepSharp, { kind: 'tool_result', text: innerRaw, toolUseId: tr.tool_use_id })) {
-                bumpPassthrough(info, 'kept_sharp');
-                info.keptSharpBlocks = (info.keptSharpBlocks ?? 0) + 1;
-                rewritten.push(blk);
-                continue;
-              }
-              // Hard wire cap: the client's own images plus ours must stay
-              // under the provider's limit, else the WHOLE request is rejected.
-              // Out of headroom → keep the text sharp; a big body beats a 400.
-              if (imageHeadroom(info) <= 0) {
-                bumpPassthrough(info, 'image_budget');
-                info.imageBudgetSkips = (info.imageBudgetSkips ?? 0) + 1;
-                rewritten.push(blk);
-                continue;
-              }
-              const inner = compactSlabWhitespace(innerRaw);
-              // classifyContent sees pre-reflow `inner` so shape bucketing reflects real structure.
-              const innerR = maybeReflow(inner, o.reflow);
-              const trHeadroom = computeLedgerHeadroomTokens(
-                innerR, denseGeo.cols, o.maxImagesPerToolResult, o.charsPerToken, 0, 0, true, denseGeo.maxChars, denseGeo
-              );
-              if (innerR.length < o.minToolResultChars) {
-                bumpPassthrough(info, 'below_threshold');
-                rewritten.push(blk);
-              } else if (!isCompressionProfitable(innerR, denseGeo.cols, o.maxImagesPerToolResult, o.charsPerToken, 0, 0, true, denseGeo.maxChars, denseGeo, 0)) {
-                bumpPassthrough(info, 'not_profitable');
-                rewritten.push(blk);
-              } else {
-                // Paging: truncate before render if it would blow the image cap.
-                // The per-result cap is the SMALLER of the configured max and what
-                // is actually left on the wire — the headroom shrinks as earlier
-                // results spend it, so each result sees the live number.
-                const resultImageCap = Math.min(o.maxImagesPerToolResult, imageHeadroom(info));
-                const linesPerImage = Math.max(
-                  1,
-                  Math.floor((denseGeo.maxHeightPx - 2 * PAD_Y) / renderCellHeight(denseGeo.style)),
-                );
-                const paged = truncateForBudget(
-                  innerR,
-                  resultImageCap,
-                  denseGeo.cols,
-                  denseGeo.maxChars,
-                  linesPerImage,
-                );
-                if (paged.truncated) {
-                  info.truncatedToolResults = (info.truncatedToolResults ?? 0) + 1;
-                  info.omittedChars = (info.omittedChars ?? 0) + paged.omittedChars;
-                }
-                const { blocks: imgs, pngs: rawPngs, dims: rawDims, droppedChars, droppedCodepoints: dcp, pixels } =
-                  await textToImageBlocks(
-                    paged.text,
-                    o.cols,
-                    true,
-                    denseGeo.style,
-                    denseGeo.maxHeightPx,
-                  );
-                // Paging is budgeted at denseGeo.cols but rendering happens at
-                // o.cols; when they differ the real page count can exceed the plan.
-                // Verify against the actual render and drop OUR images rather than
-                // ship a request the provider rejects outright.
-                if (imgs.length > imageHeadroom(info)) {
-                  bumpPassthrough(info, 'image_budget');
-                  info.imageBudgetSkips = (info.imageBudgetSkips ?? 0) + 1;
-                  rewritten.push(blk);
-                  continue;
-                }
-                (info.imagePngs ??= []).push(...rawPngs);
-                (info.imageDims ??= []).push(...rawDims);
-                for (const img of imgs) info.imageBytes += approxBlockBytes(img);
-                info.imagePixels = (info.imagePixels ?? 0) + pixels;
-                info.toolResultImgs = (info.toolResultImgs ?? 0) + imgs.length;
-                info.imageCount += imgs.length;
-                await recordRecoverable(info, o.emitRecoverable, {
-                  kind: 'tool_result',
-                  toolUseId: tr.tool_use_id,
-                  text: innerRaw,
-                  imageCount: imgs.length,
-                });
-                info.compressedChars += innerRaw.length; // original length = what text billing would be
-                info.droppedChars = (info.droppedChars ?? 0) + droppedChars;
-                for (const [cp, n] of dcp) {
-                  droppedCodepoints.set(cp, (droppedCodepoints.get(cp) ?? 0) + n);
-                }
-                let trFsRes = extractFactSheetResult(innerRaw, { tokenHeadroom: trHeadroom, charsPerToken: o.charsPerToken });
-                if (!isCompressionProfitable(innerR, denseGeo.cols, o.maxImagesPerToolResult, o.charsPerToken, 0, 0, true, denseGeo.maxChars, denseGeo, trFsRes.telemetry.approxTokens)) {
-                  trFsRes = extractFactSheetResult(innerRaw, { tokenHeadroom: 0, charsPerToken: o.charsPerToken });
-                }
-                if (trFsRes.telemetry && (trFsRes.telemetry.entriesEmitted > 0 || trFsRes.telemetry.candidatesDropped > 0 || trFsRes.telemetry.budgetDynamicallyReduced)) {
-                  recordFactSheetTelemetry(info, trFsRes.telemetry);
-                }
-                const trFactSheet = trFsRes.text;
-                rewritten.push({
-                  ...tr,
-                  content: trFactSheet ? [...imgs, { type: 'text' as const, text: trFactSheet }] : imgs,
-                });
-                changed = true;
-                bumpBucket(info, toolResultBucket(classifyContent(inner)), innerRaw.length);
-              }
-            } else if (Array.isArray(innerRaw)) {
-              const newInner: Array<TextBlock | ImageBlock> = [];
-              let innerChanged = false;
-              for (const ib of innerRaw) {
-                const isTextBlock =
-                  ib &&
-                  (ib as TextBlock).type === 'text' &&
-                  typeof (ib as TextBlock).text === 'string';
-                if (!isTextBlock) {
-                  newInner.push(ib as TextBlock | ImageBlock);
-                  continue;
-                }
-                const innerTextRaw = (ib as TextBlock).text;
-                // Caller fidelity override: pin this tool_result part as text.
-                if (callerKeepsSharp(o.keepSharp, { kind: 'tool_result_part', text: innerTextRaw, toolUseId: tr.tool_use_id })) {
-                  bumpPassthrough(info, 'kept_sharp');
-                  info.keptSharpBlocks = (info.keptSharpBlocks ?? 0) + 1;
-                  newInner.push(ib as TextBlock | ImageBlock);
-                  continue;
-                }
-                // Hard wire cap — see the string-content path above.
-                if (imageHeadroom(info) <= 0) {
-                  bumpPassthrough(info, 'image_budget');
-                  info.imageBudgetSkips = (info.imageBudgetSkips ?? 0) + 1;
-                  newInner.push(ib as TextBlock | ImageBlock);
-                  continue;
-                }
-                // Lossless whitespace compaction before gate + render.
-                const innerText = compactSlabWhitespace(innerTextRaw);
-                // R3: gate/page/render on reflowed text; classify pre-reflow.
-                const innerTextR = maybeReflow(innerText, o.reflow);
-                const partHeadroom = computeLedgerHeadroomTokens(
-                  innerTextR, denseGeo.cols, o.maxImagesPerToolResult, o.charsPerToken, 0, 0, true, denseGeo.maxChars, denseGeo
-                );
-                if (innerTextR.length < o.minToolResultChars) {
-                  bumpPassthrough(info, 'below_threshold');
-                  newInner.push(ib as TextBlock | ImageBlock);
-                  continue;
-                }
-                if (!isCompressionProfitable(innerTextR, denseGeo.cols, o.maxImagesPerToolResult, o.charsPerToken, 0, 0, true, denseGeo.maxChars, denseGeo, 0)) {
-                  bumpPassthrough(info, 'not_profitable');
-                  newInner.push(ib as TextBlock | ImageBlock);
-                  continue;
-                }
-                const linesPerImage = Math.max(
-                  1,
-                  Math.floor((denseGeo.maxHeightPx - 2 * PAD_Y) / renderCellHeight(denseGeo.style)),
-                );
-                const resultImageCap = Math.min(o.maxImagesPerToolResult, imageHeadroom(info));
-                const paged = truncateForBudget(
-                  innerTextR,
-                  resultImageCap,
-                  denseGeo.cols,
-                  denseGeo.maxChars,
-                  linesPerImage,
-                );
-                if (paged.truncated) {
-                  info.truncatedToolResults = (info.truncatedToolResults ?? 0) + 1;
-                  info.omittedChars = (info.omittedChars ?? 0) + paged.omittedChars;
-                }
-                const { blocks: imgs, pngs: rawPngs, dims: rawDims, droppedChars, droppedCodepoints: dcp, pixels } =
-                  await textToImageBlocks(
-                    paged.text,
-                    o.cols,
-                    true,
-                    denseGeo.style,
-                    denseGeo.maxHeightPx,
-                  );
-                // Paging is budgeted at denseGeo.cols but rendering happens at
-                // o.cols; when they differ the real page count can exceed the plan.
-                // Verify against the actual render and drop OUR images rather than
-                // ship a request the provider rejects outright.
-                if (imgs.length > imageHeadroom(info)) {
-                  bumpPassthrough(info, 'image_budget');
-                  info.imageBudgetSkips = (info.imageBudgetSkips ?? 0) + 1;
-                  newInner.push(ib as TextBlock | ImageBlock);
-                  continue;
-                }
-                (info.imagePngs ??= []).push(...rawPngs);
-                (info.imageDims ??= []).push(...rawDims);
-                const srcCacheControl = demoteRelocatedCacheControl((ib as { cache_control?: unknown }).cache_control);
-                for (let i = 0; i < imgs.length; i++) {
-                  const img = imgs[i]!;
-                  const out =
-                    i === imgs.length - 1 && srcCacheControl !== undefined
-                      ? { ...img, cache_control: srcCacheControl }
-                      : img;
-                  newInner.push(out as ImageBlock);
-                  info.imageBytes += approxBlockBytes(img);
-                }
-                let partFsRes = extractFactSheetResult(innerTextRaw, { tokenHeadroom: partHeadroom, charsPerToken: o.charsPerToken });
-                if (!isCompressionProfitable(innerTextR, denseGeo.cols, o.maxImagesPerToolResult, o.charsPerToken, 0, 0, true, denseGeo.maxChars, denseGeo, partFsRes.telemetry.approxTokens)) {
-                  partFsRes = extractFactSheetResult(innerTextRaw, { tokenHeadroom: 0, charsPerToken: o.charsPerToken });
-                }
-                if (partFsRes.telemetry && (partFsRes.telemetry.entriesEmitted > 0 || partFsRes.telemetry.candidatesDropped > 0 || partFsRes.telemetry.budgetDynamicallyReduced)) {
-                  recordFactSheetTelemetry(info, partFsRes.telemetry);
-                }
-                const partFactSheet = partFsRes.text;
-                if (partFactSheet) newInner.push({ type: 'text', text: partFactSheet });
-                info.imagePixels = (info.imagePixels ?? 0) + pixels;
-                info.toolResultImgs = (info.toolResultImgs ?? 0) + imgs.length;
-                info.imageCount += imgs.length;
-                await recordRecoverable(info, o.emitRecoverable, {
-                  kind: 'tool_result_part',
-                  toolUseId: tr.tool_use_id,
-                  text: innerTextRaw,
-                  imageCount: imgs.length,
-                });
-                info.compressedChars += innerTextRaw.length;
-                info.droppedChars = (info.droppedChars ?? 0) + droppedChars;
-                for (const [cp, n] of dcp) {
-                  droppedCodepoints.set(cp, (droppedCodepoints.get(cp) ?? 0) + n);
-                }
-                bumpBucket(info, toolResultBucket(classifyContent(innerText)), innerTextRaw.length);
-                innerChanged = true;
-              }
-              if (innerChanged) {
-                rewritten.push({ ...tr, content: newInner });
-                changed = true;
-              } else {
-                rewritten.push(blk);
-              }
-            } else {
-              rewritten.push(blk);
-            }
-          } else {
-            rewritten.push(blk);
-          }
-        }
-        if (changed) msg.content = rewritten;
-      }
-    }
   }
 
   if (toolsRewritten) req.tools = toolsRewritten;
 
-  // 6. History-image compression (always runs after per-message rewrites).
+  // 6. History-image compression runs before live tool-result imaging so the collapse always sees original text.
   // History is single-col dense; use slab cpt unless host pinned charsPerToken.
   // protectedPrefix excludes the slab-bearing first user message — collapsing it
   // would reduce slab images to [image] placeholders and destroy the cache anchor.
@@ -2782,6 +2593,10 @@ export async function transformRequest(
       for (const [cp, n] of histInfo.droppedCodepoints) {
         droppedCodepoints.set(cp, (droppedCodepoints.get(cp) ?? 0) + n);
       }
+    } else if (histInfo.collapsedTurns > 0 && histInfo.collapsedImageBytes > imageByteHeadroom(info, o.maxImageBytes)) {
+      bumpPassthrough(info, 'image_budget');
+      info.imageByteSkips = (info.imageByteSkips ?? 0) + 1;
+      info.historyReason = 'image_bytes';
     } else if (histInfo.collapsedTurns > 0) {
       req.messages = newMessages;
       info.collapsedTurns = histInfo.collapsedTurns;
@@ -2821,6 +2636,262 @@ export async function transformRequest(
     }
   }
 
+  // 7. Compress surviving live tool_result content after history collapse.
+  if (o.compressToolResults) {
+    for (const msg of req.messages ?? []) {
+      if (msg.role !== 'user' || !Array.isArray(msg.content)) continue;
+      const rewritten: ContentBlock[] = [];
+      let changed = false;
+      for (const blk of msg.content) {
+        if (blk && (blk as ToolResultBlock).type === 'tool_result') {
+          const tr = blk as ToolResultBlock;
+          // Anthropic rejects images inside is_error tool_results — leave alone.
+          if (tr.is_error === true) {
+            rewritten.push(blk);
+            continue;
+          }
+          const innerRaw = tr.content;
+          if (typeof innerRaw === 'string') {
+            // Caller fidelity override: pin this tool_result as text.
+            if (callerKeepsSharp(o.keepSharp, { kind: 'tool_result', text: innerRaw, toolUseId: tr.tool_use_id })) {
+              bumpPassthrough(info, 'kept_sharp');
+              info.keptSharpBlocks = (info.keptSharpBlocks ?? 0) + 1;
+              rewritten.push(blk);
+              continue;
+            }
+            // Hard wire cap: the client's own images plus ours must stay
+            // under the provider's limit, else the WHOLE request is rejected.
+            // Out of headroom → keep the text sharp; a big body beats a 400.
+            if (imageHeadroom(info) <= 0) {
+              bumpPassthrough(info, 'image_budget');
+              info.imageBudgetSkips = (info.imageBudgetSkips ?? 0) + 1;
+              rewritten.push(blk);
+              continue;
+            }
+            const inner = compactSlabWhitespace(innerRaw);
+            // classifyContent sees pre-reflow `inner` so shape bucketing reflects real structure.
+            const innerR = maybeReflow(inner, o.reflow);
+            const trHeadroom = computeLedgerHeadroomTokens(
+              innerR, denseGeo.cols, o.maxImagesPerToolResult, o.charsPerToken, 0, 0, true, denseGeo.maxChars, denseGeo
+            );
+            if (innerR.length < o.minToolResultChars) {
+              bumpPassthrough(info, 'below_threshold');
+              rewritten.push(blk);
+            } else if (!isCompressionProfitable(innerR, denseGeo.cols, o.maxImagesPerToolResult, o.charsPerToken, 0, 0, true, denseGeo.maxChars, denseGeo, 0)) {
+              bumpPassthrough(info, 'not_profitable');
+              rewritten.push(blk);
+            } else {
+              // Paging: truncate before render if it would blow the image cap.
+              // The per-result cap is the SMALLER of the configured max and what
+              // is actually left on the wire — the headroom shrinks as earlier
+              // results spend it, so each result sees the live number.
+              const resultImageCap = Math.min(o.maxImagesPerToolResult, imageHeadroom(info));
+              const linesPerImage = Math.max(
+                1,
+                Math.floor((denseGeo.maxHeightPx - 2 * PAD_Y) / renderCellHeight(denseGeo.style)),
+              );
+              const paged = truncateForBudget(
+                innerR,
+                resultImageCap,
+                denseGeo.cols,
+                denseGeo.maxChars,
+                linesPerImage,
+              );
+              if (paged.truncated) {
+                info.truncatedToolResults = (info.truncatedToolResults ?? 0) + 1;
+                info.omittedChars = (info.omittedChars ?? 0) + paged.omittedChars;
+              }
+              const { blocks: imgs, pngs: rawPngs, dims: rawDims, droppedChars, droppedCodepoints: dcp, pixels } =
+                await textToImageBlocks(
+                  paged.text,
+                  o.cols,
+                  true,
+                  denseGeo.style,
+                  denseGeo.maxHeightPx,
+                );
+              // Paging is budgeted at denseGeo.cols but rendering happens at
+              // o.cols; when they differ the real page count can exceed the plan.
+              // Verify against the actual render and drop OUR images rather than
+              // ship a request the provider rejects outright.
+              const renderedBytes = rawPngs.reduce((sum, png) => sum + png.length, 0);
+              const overCount = imgs.length > imageHeadroom(info);
+              const overBytes = renderedBytes > imageByteHeadroom(info, o.maxImageBytes);
+              if (overCount || overBytes) {
+                bumpPassthrough(info, 'image_budget');
+                if (overBytes && !overCount) info.imageByteSkips = (info.imageByteSkips ?? 0) + 1;
+                else info.imageBudgetSkips = (info.imageBudgetSkips ?? 0) + 1;
+                rewritten.push(blk);
+                continue;
+              }
+              (info.imagePngs ??= []).push(...rawPngs);
+              (info.imageDims ??= []).push(...rawDims);
+              for (const img of imgs) info.imageBytes += approxBlockBytes(img);
+              info.imagePixels = (info.imagePixels ?? 0) + pixels;
+              info.toolResultImgs = (info.toolResultImgs ?? 0) + imgs.length;
+              info.imageCount += imgs.length;
+              await recordRecoverable(info, o.emitRecoverable, {
+                kind: 'tool_result',
+                toolUseId: tr.tool_use_id,
+                text: innerRaw,
+                imageCount: imgs.length,
+              });
+              info.compressedChars += innerRaw.length; // original length = what text billing would be
+              info.droppedChars = (info.droppedChars ?? 0) + droppedChars;
+              for (const [cp, n] of dcp) {
+                droppedCodepoints.set(cp, (droppedCodepoints.get(cp) ?? 0) + n);
+              }
+              let trFsRes = extractFactSheetResult(innerRaw, { tokenHeadroom: trHeadroom, charsPerToken: o.charsPerToken });
+              if (!isCompressionProfitable(innerR, denseGeo.cols, o.maxImagesPerToolResult, o.charsPerToken, 0, 0, true, denseGeo.maxChars, denseGeo, trFsRes.telemetry.approxTokens)) {
+                trFsRes = extractFactSheetResult(innerRaw, { tokenHeadroom: 0, charsPerToken: o.charsPerToken });
+              }
+              if (trFsRes.telemetry && (trFsRes.telemetry.entriesEmitted > 0 || trFsRes.telemetry.candidatesDropped > 0 || trFsRes.telemetry.budgetDynamicallyReduced)) {
+                recordFactSheetTelemetry(info, trFsRes.telemetry);
+              }
+              const trFactSheet = trFsRes.text;
+              rewritten.push({
+                ...tr,
+                content: trFactSheet ? [...imgs, { type: 'text' as const, text: trFactSheet }] : imgs,
+              });
+              changed = true;
+              bumpBucket(info, toolResultBucket(classifyContent(inner)), innerRaw.length);
+            }
+          } else if (Array.isArray(innerRaw)) {
+            const newInner: Array<TextBlock | ImageBlock> = [];
+            let innerChanged = false;
+            for (const ib of innerRaw) {
+              const isTextBlock =
+                ib &&
+                (ib as TextBlock).type === 'text' &&
+                typeof (ib as TextBlock).text === 'string';
+              if (!isTextBlock) {
+                newInner.push(ib as TextBlock | ImageBlock);
+                continue;
+              }
+              const innerTextRaw = (ib as TextBlock).text;
+              // Caller fidelity override: pin this tool_result part as text.
+              if (callerKeepsSharp(o.keepSharp, { kind: 'tool_result_part', text: innerTextRaw, toolUseId: tr.tool_use_id })) {
+                bumpPassthrough(info, 'kept_sharp');
+                info.keptSharpBlocks = (info.keptSharpBlocks ?? 0) + 1;
+                newInner.push(ib as TextBlock | ImageBlock);
+                continue;
+              }
+              // Hard wire cap — see the string-content path above.
+              if (imageHeadroom(info) <= 0) {
+                bumpPassthrough(info, 'image_budget');
+                info.imageBudgetSkips = (info.imageBudgetSkips ?? 0) + 1;
+                newInner.push(ib as TextBlock | ImageBlock);
+                continue;
+              }
+              // Lossless whitespace compaction before gate + render.
+              const innerText = compactSlabWhitespace(innerTextRaw);
+              // R3: gate/page/render on reflowed text; classify pre-reflow.
+              const innerTextR = maybeReflow(innerText, o.reflow);
+              const partHeadroom = computeLedgerHeadroomTokens(
+                innerTextR, denseGeo.cols, o.maxImagesPerToolResult, o.charsPerToken, 0, 0, true, denseGeo.maxChars, denseGeo
+              );
+              if (innerTextR.length < o.minToolResultChars) {
+                bumpPassthrough(info, 'below_threshold');
+                newInner.push(ib as TextBlock | ImageBlock);
+                continue;
+              }
+              if (!isCompressionProfitable(innerTextR, denseGeo.cols, o.maxImagesPerToolResult, o.charsPerToken, 0, 0, true, denseGeo.maxChars, denseGeo, 0)) {
+                bumpPassthrough(info, 'not_profitable');
+                newInner.push(ib as TextBlock | ImageBlock);
+                continue;
+              }
+              const linesPerImage = Math.max(
+                1,
+                Math.floor((denseGeo.maxHeightPx - 2 * PAD_Y) / renderCellHeight(denseGeo.style)),
+              );
+              const resultImageCap = Math.min(o.maxImagesPerToolResult, imageHeadroom(info));
+              const paged = truncateForBudget(
+                innerTextR,
+                resultImageCap,
+                denseGeo.cols,
+                denseGeo.maxChars,
+                linesPerImage,
+              );
+              if (paged.truncated) {
+                info.truncatedToolResults = (info.truncatedToolResults ?? 0) + 1;
+                info.omittedChars = (info.omittedChars ?? 0) + paged.omittedChars;
+              }
+              const { blocks: imgs, pngs: rawPngs, dims: rawDims, droppedChars, droppedCodepoints: dcp, pixels } =
+                await textToImageBlocks(
+                  paged.text,
+                  o.cols,
+                  true,
+                  denseGeo.style,
+                  denseGeo.maxHeightPx,
+                );
+              // Paging is budgeted at denseGeo.cols but rendering happens at
+              // o.cols; when they differ the real page count can exceed the plan.
+              // Verify against the actual render and drop OUR images rather than
+              // ship a request the provider rejects outright.
+              const renderedBytes = rawPngs.reduce((sum, png) => sum + png.length, 0);
+              const overCount = imgs.length > imageHeadroom(info);
+              const overBytes = renderedBytes > imageByteHeadroom(info, o.maxImageBytes);
+              if (overCount || overBytes) {
+                bumpPassthrough(info, 'image_budget');
+                if (overBytes && !overCount) info.imageByteSkips = (info.imageByteSkips ?? 0) + 1;
+                else info.imageBudgetSkips = (info.imageBudgetSkips ?? 0) + 1;
+                newInner.push(ib as TextBlock | ImageBlock);
+                continue;
+              }
+              (info.imagePngs ??= []).push(...rawPngs);
+              (info.imageDims ??= []).push(...rawDims);
+              const srcCacheControl = demoteRelocatedCacheControl((ib as { cache_control?: unknown }).cache_control);
+              for (let i = 0; i < imgs.length; i++) {
+                const img = imgs[i]!;
+                const out =
+                  i === imgs.length - 1 && srcCacheControl !== undefined
+                    ? { ...img, cache_control: srcCacheControl }
+                    : img;
+                newInner.push(out as ImageBlock);
+                info.imageBytes += approxBlockBytes(img);
+              }
+              let partFsRes = extractFactSheetResult(innerTextRaw, { tokenHeadroom: partHeadroom, charsPerToken: o.charsPerToken });
+              if (!isCompressionProfitable(innerTextR, denseGeo.cols, o.maxImagesPerToolResult, o.charsPerToken, 0, 0, true, denseGeo.maxChars, denseGeo, partFsRes.telemetry.approxTokens)) {
+                partFsRes = extractFactSheetResult(innerTextRaw, { tokenHeadroom: 0, charsPerToken: o.charsPerToken });
+              }
+              if (partFsRes.telemetry && (partFsRes.telemetry.entriesEmitted > 0 || partFsRes.telemetry.candidatesDropped > 0 || partFsRes.telemetry.budgetDynamicallyReduced)) {
+                recordFactSheetTelemetry(info, partFsRes.telemetry);
+              }
+              const partFactSheet = partFsRes.text;
+              if (partFactSheet) newInner.push({ type: 'text', text: partFactSheet });
+              info.imagePixels = (info.imagePixels ?? 0) + pixels;
+              info.toolResultImgs = (info.toolResultImgs ?? 0) + imgs.length;
+              info.imageCount += imgs.length;
+              await recordRecoverable(info, o.emitRecoverable, {
+                kind: 'tool_result_part',
+                toolUseId: tr.tool_use_id,
+                text: innerTextRaw,
+                imageCount: imgs.length,
+              });
+              info.compressedChars += innerTextRaw.length;
+              info.droppedChars = (info.droppedChars ?? 0) + droppedChars;
+              for (const [cp, n] of dcp) {
+                droppedCodepoints.set(cp, (droppedCodepoints.get(cp) ?? 0) + n);
+              }
+              bumpBucket(info, toolResultBucket(classifyContent(innerText)), innerTextRaw.length);
+              innerChanged = true;
+            }
+            if (innerChanged) {
+              rewritten.push({ ...tr, content: newInner });
+              changed = true;
+            } else {
+              rewritten.push(blk);
+            }
+          } else {
+            rewritten.push(blk);
+          }
+        } else {
+          rewritten.push(blk);
+        }
+      }
+      if (changed) msg.content = rewritten;
+    }
+  }
+
   info.compressed = true;
   // Attribution signal for prompt-cache busts (#11): digest the exact pinned
   // prefix we send (history/slab boundary; live tail excluded) AFTER all marker
@@ -2852,6 +2923,7 @@ export async function transformRequest(
     info.droppedCodepointsTop = out;
   }
   applyPins(req, info, pins);
+  if (nearImageByteLimit(info, o.maxImageBytes)) info.imageBytesNearLimit = true;
   info.outgoingTextChars = countOutgoingTextChars(req);
   // Ground truth for the main path too — see the note at the other call site.
   info.wireImages = countNativeImages(req.messages);

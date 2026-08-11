@@ -1,5 +1,5 @@
 /**
- * Minimal PNG encoder (grayscale + RGB, 8-bit, filter=None, single IDAT).
+ * Minimal PNG encoder (grayscale + RGB, 8-bit, PNG Average filter, single IDAT).
  * Pure Uint8Array — uses CompressionStream (Node 18+, Workers, browsers); no Buffer/node:zlib.
  */
 
@@ -77,6 +77,27 @@ async function deflateZlib(input: Uint8Array): Promise<Uint8Array> {
 
 const PNG_SIGNATURE = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
+
+/** PNG Average filter (type 3). Reversible byte-for-byte and typically much
+ * smaller for monospace glyph pages because neighboring/background pixels
+ * become low-entropy residuals before deflate. */
+function filterAverage(pixels: Uint8Array, width: number, height: number, bpp: number): Uint8Array {
+  const rowBytes = width * bpp;
+  const stride = rowBytes + 1;
+  const out = new Uint8Array(stride * height);
+  for (let y = 0; y < height; y++) {
+    const src = y * rowBytes;
+    const dst = y * stride;
+    out[dst] = 3;
+    for (let x = 0; x < rowBytes; x++) {
+      const left = x >= bpp ? pixels[src + x - bpp]! : 0;
+      const above = y > 0 ? pixels[src - rowBytes + x]! : 0;
+      out[dst + 1 + x] = (pixels[src + x]! - ((left + above) >> 1)) & 0xff;
+    }
+  }
+  return out;
+}
+
 /** Encode a single-channel (grayscale) buffer as PNG bytes. pixels is row-major, length = width × height. */
 export async function encodeGrayPng(pixels: Uint8Array, width: number, height: number): Promise<Uint8Array> {
   if (pixels.length !== width * height) {
@@ -90,15 +111,7 @@ export async function encodeGrayPng(pixels: Uint8Array, width: number, height: n
   ihdr[8] = 8;
   ihdr[9] = 0; // colorType 0 = grayscale; bytes 10-12 already zero
 
-  // Prepend per-scanline filter byte (0 = None).
-  const stride = width + 1;
-  const raw = new Uint8Array(stride * height);
-  for (let y = 0; y < height; y++) {
-    raw[y * stride] = 0; // filter: None
-    raw.set(pixels.subarray(y * width, (y + 1) * width), y * stride + 1);
-  }
-
-  const compressed = await deflateZlib(raw);
+  const compressed = await deflateZlib(filterAverage(pixels, width, height, 1));
 
   return concat([
     PNG_SIGNATURE,
@@ -120,15 +133,7 @@ export async function encodeRgbPng(pixels: Uint8Array, width: number, height: nu
   ihdr[8] = 8; // bit depth per channel
   ihdr[9] = 2; // colorType 2 = truecolor RGB; bytes 10-12 already zero
 
-  // Prepend per-scanline filter byte (0 = None).
-  const stride = width * 3 + 1;
-  const raw = new Uint8Array(stride * height);
-  for (let y = 0; y < height; y++) {
-    raw[y * stride] = 0; // filter: None
-    raw.set(pixels.subarray(y * width * 3, (y + 1) * width * 3), y * stride + 1);
-  }
-
-  const compressed = await deflateZlib(raw);
+  const compressed = await deflateZlib(filterAverage(pixels, width, height, 3));
 
   return concat([
     PNG_SIGNATURE,

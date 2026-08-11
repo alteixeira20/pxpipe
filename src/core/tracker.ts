@@ -18,6 +18,8 @@ export interface TrackEvent {
   status: number;
   duration_ms: number;
   first_byte_ms?: number;
+  /** Local transform/render ms; separates PXPipe CPU from provider latency. */
+  transform_ms?: number;
 
   // From TransformInfo:
   compressed?: boolean;
@@ -35,6 +37,12 @@ export interface TrackEvent {
    *  here plus a fat request means the client's own images crowded us out — the
    *  request stayed valid, but the token win was skipped. */
   image_budget_skips?: number;
+  /** Decoded bytes of caller-provided images occupying the same request budget. */
+  native_image_bytes?: number;
+  /** Imaging groups kept as text because the decoded-byte budget was exhausted. */
+  image_byte_skips?: number;
+  /** Request finished inside the top 10% of its configured image-byte budget. */
+  image_bytes_near_limit?: boolean;
   /** Image blocks really on the wire. Present only when it differs from
    *  image_count + native_images — i.e. when the history collapse absorbed
    *  messages that already carried images, so we rendered more than we sent. */
@@ -253,6 +261,7 @@ export function toTrackEvent(ev: ProxyEvent): TrackEvent {
   if (ev.model) out.model = ev.model;
   if (ev.accountingProvider) out.accounting_provider = ev.accountingProvider;
   if (ev.firstByteMs !== undefined) out.first_byte_ms = ev.firstByteMs;
+  if (ev.transformMs !== undefined) out.transform_ms = ev.transformMs;
   if (ev.trajectory) {
     out.trajectory_session_sha8 = ev.trajectory.sessionSha8;
     if (ev.trajectory.lineageSha8) out.trajectory_lineage_sha8 = ev.trajectory.lineageSha8;
@@ -298,7 +307,10 @@ export function toTrackEvent(ev: ProxyEvent): TrackEvent {
     // Only when nonzero: a wire without client images is the common case and
     // should not pay a key per event.
     if ((info.nativeImages ?? 0) > 0) out.native_images = info.nativeImages;
+    if ((info.nativeImageBytes ?? 0) > 0) out.native_image_bytes = info.nativeImageBytes;
     if ((info.imageBudgetSkips ?? 0) > 0) out.image_budget_skips = info.imageBudgetSkips;
+    if ((info.imageByteSkips ?? 0) > 0) out.image_byte_skips = info.imageByteSkips;
+    if (info.imageBytesNearLimit === true) out.image_bytes_near_limit = true;
     // Emit only when it disagrees with the render counter: equality is the common
     // case and a per-event key for "nothing to see" is noise.
     if (info.wireImages !== undefined
