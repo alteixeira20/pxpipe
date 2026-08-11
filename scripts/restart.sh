@@ -2,10 +2,9 @@
 # Restart the local pxpipe proxy.
 #
 # What this does, in order:
-#   1. Discover every running pxpipe proxy via `pgrep -f "node.*bin/cli.js"`
-#      and list them. If multiple are running (orphans from a prior crashed
-#      session), kill all of them — there's no "right" oldest in a graceful
-#      restart, we want a clean slate.
+#   1. Find the pxpipe proxy listening on the port this checkout is about to
+#      bind, and only that one. Process-name matching alone also finds proxies
+#      served from other clones/worktrees and is not ownership.
 #   2. Send SIGTERM. The proxy's SIGTERM handler flushes the JSONL tracker
 #      and exits. Poll up to 5s for clean exit.
 #   3. Anything still alive after 5s gets SIGKILL with a warning.
@@ -73,7 +72,41 @@ list_serving_pids() {
     esac
   done
 }
-PIDS_RAW=$(list_serving_pids || true)
+# --- Ownership is the PORT, not the process name --------------------------
+# A process-name match sees pxpipe proxies from every clone/worktree. Only a
+# candidate listening on the port this checkout is about to bind belongs to
+# this restart. With no listener-inspection tool available, fail closed and
+# refuse to signal by process name alone.
+port_listener_pids() {
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP:"$TARGET_PORT" -sTCP:LISTEN -t 2>/dev/null
+    return 0
+  fi
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltnpH "sport = :$TARGET_PORT" 2>/dev/null \
+      | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u
+    return 0
+  fi
+  return 1
+}
+
+list_owned_pids() {
+  local candidates listeners p
+  candidates=$(list_serving_pids || true)
+  [ -n "$candidates" ] || return 0
+  if ! listeners=$(port_listener_pids); then
+    echo "[restart] WARNING: neither lsof nor ss is available; refusing to" >&2
+    echo "  signal pxpipe processes by name because another checkout may own them." >&2
+    echo "  Stop the listener on :$TARGET_PORT yourself, or install lsof/ss." >&2
+    return 0
+  fi
+  [ -n "$listeners" ] || return 0
+  for p in $candidates; do
+    if echo "$listeners" | grep -qx "$p"; then echo "$p"; fi
+  done
+}
+
+PIDS_RAW=$(list_owned_pids || true)
 if [ -n "$PIDS_RAW" ]; then
   # Convert to space-separated list, sorted numerically for stable output.
   PIDS=$(echo "$PIDS_RAW" | tr '\n' ' ' | xargs -n1 | sort -n | tr '\n' ' ')
@@ -89,13 +122,13 @@ if [ -n "$PIDS_RAW" ]; then
 
   # Poll up to 5s for graceful exit.
   for _ in $(seq 1 50); do
-    STILL=$(list_serving_pids || true)
+    STILL=$(list_owned_pids || true)
     [ -z "$STILL" ] && break
     sleep 0.1
   done
 
   # --- 3. Escalate to SIGKILL only if still alive ---
-  STILL=$(list_serving_pids || true)
+  STILL=$(list_owned_pids || true)
   if [ -n "$STILL" ]; then
     echo "[restart] WARNING: PID(s) still alive after 5s, escalating to SIGKILL: $STILL"
     for pid in $STILL; do
@@ -104,7 +137,7 @@ if [ -n "$PIDS_RAW" ]; then
     sleep 0.3
   fi
 else
-  echo "[restart] no running proxy found"
+  echo "[restart] no pxpipe proxy of this checkout is serving :$TARGET_PORT"
 fi
 
 # --- 4. Rebuild (skippable) ----------------------------------------------
