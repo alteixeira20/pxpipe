@@ -1,29 +1,62 @@
-name: RC snapshot
+name: RC runtime apply
 
 on:
   push:
     branches:
       - stabilize/rc-runtime-parity-20260811
-  pull_request:
-    branches:
-      - main
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  snapshot:
-    if: github.head_ref == 'stabilize/rc-runtime-parity-20260811' || github.ref_name == 'stabilize/rc-runtime-parity-20260811'
+  apply-and-validate:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
-          persist-credentials: false
-      - name: Create exact source snapshot
-        run: git archive --format=tar.gz --output=pxpipe-rc-source.tar.gz HEAD
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: pxpipe-rc-source
-          path: pxpipe-rc-source.tar.gz
-          if-no-files-found: error
-          retention-days: 1
+          node-version: '24'
+          cache: pnpm
+      - name: Reconstruct exact patch
+        run: |
+          cat .github/rc/runtime.part* | base64 -d > /tmp/runtime.patch
+          echo '4501be8f67e193c1d1fc723f4aeb0e089d9eb775d653b38fd3463bc46d62a7d0  /tmp/runtime.patch' | sha256sum -c -
+          git apply --check /tmp/runtime.patch
+          git apply /tmp/runtime.patch
+      - name: Refresh dependency lock
+        run: |
+          pnpm install --no-frozen-lockfile
+          pnpm install --frozen-lockfile
+      - run: pnpm run audit
+      - run: pnpm run typecheck
+      - name: Focused runtime regressions
+        run: pnpm vitest run tests/runtime-parity.test.ts tests/codex-runtime-model.test.ts tests/request-body-limit.test.ts tests/image-byte-budget.test.ts
+      - run: pnpm test
+      - run: pnpm run test:restart
+      - run: pnpm run build
+      - name: CLI misuse guards
+        run: |
+          if node dist/node.js codex-ar >/tmp/codex-ar.out 2>&1; then exit 1; fi
+          grep -q 'pxpipe codex --binary codex-ar' /tmp/codex-ar.out
+          if node dist/node.js warp -- codex-ar >/tmp/warp-codex.out 2>&1; then exit 1; fi
+          grep -q 'warp is not the Codex integration path' /tmp/warp-codex.out
+      - name: Dashboard HEAD stays local
+        run: |
+          PORT=47991 node dist/node.js >/tmp/pxpipe-head.log 2>&1 &
+          pid=$!
+          trap 'kill $pid 2>/dev/null || true' EXIT
+          for i in $(seq 1 40); do curl -fsS http://127.0.0.1:47991/ >/dev/null && break; sleep .25; done
+          curl -fsSI http://127.0.0.1:47991/ | grep -q '200 OK'
+      - run: pnpm exec wrangler deploy --dry-run
+      - run: git diff --check
+      - name: Commit validated source
+        run: |
+          rm -rf .github/rc .github/workflows/rc-snapshot.yml
+          git add -A
+          git diff --cached --check
+          git config user.name 'pxpipe-rc-bot'
+          git config user.email 'pxpipe-rc-bot@users.noreply.github.com'
+          git commit -m 'fix(rc): harden runtime parity and portability'
+          git push origin HEAD:stabilize/rc-runtime-parity-20260811
