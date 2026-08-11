@@ -36,7 +36,11 @@ jobs:
           git apply /tmp/ts7.patch
       - name: Reconstruct exact HEAD and billing regression patch
         run: |
+          wc -c .github/rc/headfix.part*
+          sha256sum .github/rc/headfix.part*
           cat .github/rc/headfix.part* | base64 -d > /tmp/headfix.patch
+          wc -c /tmp/headfix.patch
+          sha256sum /tmp/headfix.patch
           echo '4d047e223718490671685c45ae259f1f40402dfa4cfd3f5d6efd289d4fdc5cae  /tmp/headfix.patch' | sha256sum -c -
           git apply --check /tmp/headfix.patch
           git apply /tmp/headfix.patch
