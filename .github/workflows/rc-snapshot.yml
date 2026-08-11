@@ -1,0 +1,26 @@
+name: RC snapshot
+
+on:
+  push:
+    branches:
+      - stabilize/rc-runtime-parity-20260811
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Create exact source snapshot
+        run: |
+          git archive --format=tar.gz --output=pxpipe-rc-source.tar.gz HEAD
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pxpipe-rc-source
+          path: pxpipe-rc-source.tar.gz
+          if-no-files-found: error
+          retention-days: 1
