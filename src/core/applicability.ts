@@ -113,7 +113,7 @@ function envOrDefaultBases(): string[] {
   const trimmed = raw.trim();
   if (!trimmed) return [...DEFAULT_MODEL_BASES];
   if (falsey(trimmed)) return [];
-  return trimmed.split(',').map((s) => s.trim()).filter(Boolean);
+  return trimmed.split(',').map((s: string) => s.trim()).filter(Boolean);
 }
 
 function modelBaseMatches(id: string, candidate: string): boolean {

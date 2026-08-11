@@ -659,6 +659,10 @@ export interface TransformInfo {
   pinChars?: number;
   /** Pin folding threw and was skipped. The body still goes out unpinned. */
   pinError?: string;
+  /** Claude Code's volatile per-turn billing header, removed from the body and
+   *  forwarded as an actual HTTP header by proxy.ts. Keeping it in system text
+   *  invalidates the cache prefix on every request once cc_prev_req changes. */
+  billingLine?: string;
   /** OpenAI Responses only: local o200k decomposition of the ORIGINAL request
    *  before pxpipe rewrites it. No provider count_tokens call. Categories are
    *  mutually exclusive text-token estimates; imageParts counts native images. */
@@ -925,6 +929,9 @@ const DYNAMIC_BLOCK_TAGS = [
   'git_status',
   'directoryStructure',
   'system-reminder',
+  // Claude Code runtime counter; changes every turn and must never enter the
+  // cacheable image slab.
+  'total_tokens',
 ] as const;
 
 // Known-static slab tags — suppresses first-sighting `unknownStaticTags` noise
@@ -1004,18 +1011,53 @@ function splitStaticDynamic(text: string): {
       unknownTags: [],
       staticTagContents: new Map(),
     };
-  const pattern = new RegExp(
-    `<(${DYNAMIC_BLOCK_TAGS.join('|')})(\\s[^>]*)?>[\\s\\S]*?</\\1>`,
-    'g',
-  );
+  // Scan dynamic XML-like blocks by index instead of a lazy `[\s\S]*?` regex.
+  // A transcript containing many opening tags but no closer made the regex
+  // repeatedly rescan the remaining tail (quadratic CPU on an untrusted body).
+  // Once a tag has no closer, no later opening of that same tag can have one
+  // either, so `noCloser` makes the worst case linear in input size × the small
+  // fixed tag catalog.
+  const dynamicNames = new Set<string>(DYNAMIC_BLOCK_TAGS);
+  const noCloser = new Set<string>();
   const dynamicParts: string[] = [];
   let staticBuf = '';
   let cursor = 0;
-  let m: RegExpExecArray | null;
-  while ((m = pattern.exec(text)) !== null) {
-    staticBuf += text.slice(cursor, m.index);
-    dynamicParts.push(m[0]);
-    cursor = m.index + m[0].length;
+  let scan = 0;
+  while (scan < text.length) {
+    const lt = text.indexOf('<', scan);
+    if (lt < 0) break;
+    let j = lt + 1;
+    if (!isTagNameStart(text.charCodeAt(j))) {
+      scan = lt + 1;
+      continue;
+    }
+    j += 1;
+    while (j < text.length && isTagNameChar(text.charCodeAt(j))) j += 1;
+    const tag = text.slice(lt + 1, j);
+    if (!dynamicNames.has(tag) || noCloser.has(tag)) {
+      scan = j;
+      continue;
+    }
+    let gt: number;
+    if (text[j] === '>') gt = j;
+    else if (j < text.length && isTagSpace(text.charCodeAt(j))) gt = text.indexOf('>', j);
+    else {
+      scan = j;
+      continue;
+    }
+    if (gt < 0) break;
+    const close = `</${tag}>`;
+    const endStart = text.indexOf(close, gt + 1);
+    if (endStart < 0) {
+      noCloser.add(tag);
+      scan = gt + 1;
+      continue;
+    }
+    const end = endStart + close.length;
+    staticBuf += text.slice(cursor, lt);
+    dynamicParts.push(text.slice(lt, end));
+    cursor = end;
+    scan = end;
   }
   staticBuf += text.slice(cursor);
 
@@ -1029,7 +1071,7 @@ function splitStaticDynamic(text: string): {
   // Scanned by index: matching this with a regex costs quadratic time on
   // untrusted text, since both a lazy `[\s\S]*?` body and an `(?:\s[^>]*)?>`
   // attribute run rescan the tail once per candidate tag.
-  const noCloser = new Set<string>();
+  const staticNoCloser = new Set<string>();
   let i = 0;
   while (i < staticBuf.length) {
     const lt = staticBuf.indexOf('<', i);
@@ -1058,9 +1100,9 @@ function splitStaticDynamic(text: string): {
     const closer = `</${tag}>`;
     // A closer missing after one opening is missing for every later opening of
     // the same tag, so record it and skip the repeated failed scan.
-    const end = noCloser.has(tag) ? -1 : staticBuf.indexOf(closer, contentStart);
+    const end = staticNoCloser.has(tag) ? -1 : staticBuf.indexOf(closer, contentStart);
     if (end < 0) {
-      noCloser.add(tag);
+      staticNoCloser.add(tag);
       i = lt + 1;
       continue;
     }
@@ -1480,11 +1522,41 @@ function stripBillingLine(text: string): { kept: string | null; body: string } {
  *  to stripBillingLine: `kept` re-enters the system tail as plain text, after
  *  the anchor, so the slab bytes stay independent of git state. */
 function stripMarkdownEnvSection(text: string): { kept: string; body: string } {
-  const m = /(?:^|\n)(# Environment\b[\s\S]*?)(?=\n#{1,6}\s|$)/.exec(text);
-  if (!m) return { kept: '', body: text };
+  // Line scan rather than a lazy whole-tail regex: system text is client input,
+  // and repeated near-headings without a terminating heading must stay O(n).
+  let sectionStart = -1;
+  let contentStart = -1;
+  let lineStart = 0;
+  while (lineStart <= text.length) {
+    const lineEnd = text.indexOf('\n', lineStart);
+    const end = lineEnd < 0 ? text.length : lineEnd;
+    const line = text.slice(lineStart, end);
+    if (/^# Environment\b/.test(line)) {
+      sectionStart = lineStart > 0 && text[lineStart - 1] === '\n' ? lineStart - 1 : lineStart;
+      contentStart = lineStart;
+      break;
+    }
+    if (lineEnd < 0) break;
+    lineStart = lineEnd + 1;
+  }
+  if (sectionStart < 0 || contentStart < 0) return { kept: '', body: text };
+
+  let sectionEnd = text.length;
+  lineStart = text.indexOf('\n', contentStart);
+  lineStart = lineStart < 0 ? text.length : lineStart + 1;
+  while (lineStart < text.length) {
+    const lineEnd = text.indexOf('\n', lineStart);
+    const end = lineEnd < 0 ? text.length : lineEnd;
+    if (/^#{1,6}\s/.test(text.slice(lineStart, end))) {
+      sectionEnd = lineStart > 0 ? lineStart - 1 : lineStart;
+      break;
+    }
+    if (lineEnd < 0) break;
+    lineStart = lineEnd + 1;
+  }
   return {
-    kept: m[1]!.trimEnd(),
-    body: text.slice(0, m.index) + text.slice(m.index + m[0].length),
+    kept: text.slice(contentStart, sectionEnd).trimEnd(),
+    body: text.slice(0, sectionStart) + text.slice(sectionEnd),
   };
 }
 
@@ -2162,7 +2234,26 @@ export async function transformRequest(
   // `429 rate_limit_error: "Error"` when it does not lead (#149). Lift it out
   // here so the assembly below can put it back in front.
   const { identity: keptIdentity, kept: sysRemainder } = liftIdentityBlock(rawSysRemainder);
-  const { kept: billingLine, body: sysBody } = stripBillingLine(rawSysText);
+  let { kept: billingLine, body: sysBody } = stripBillingLine(rawSysText);
+  // A cache-controlled system block makes extractSystemText keep unmarked text
+  // blocks verbatim; the billing header can therefore bypass rawSysText. Strip
+  // it from that remainder as well and forward it exactly once as a real header.
+  if (Array.isArray(sysRemainder)) {
+    for (let i = sysRemainder.length - 1; i >= 0; i -= 1) {
+      const blk = sysRemainder[i] as TextBlock | undefined;
+      if (!blk || blk.type !== 'text' || typeof blk.text !== 'string') continue;
+      const strippedBilling = stripBillingLine(blk.text);
+      if (strippedBilling.kept === null) continue;
+      billingLine ??= strippedBilling.kept;
+      if (strippedBilling.body.trim() === '') sysRemainder.splice(i, 1);
+      else sysRemainder[i] = { ...blk, text: strippedBilling.body };
+    }
+  }
+  // Attach the volatile header immediately: coding-safe can return through the
+  // history-only path before the slab is evaluated, and the body has already
+  // had this line removed at that point. Keeping the metadata here guarantees
+  // every rewritten path forwards the header rather than silently dropping it.
+  if (billingLine) info.billingLine = billingLine;
   // `# Environment` (working dir, git status, model ID) churns per turn but has
   // no XML wrapper, so the static/dynamic split would bake it into the slab PNG
   // and a one-file edit would re-render the whole prefix. Pull it out first; it
@@ -2502,10 +2593,10 @@ export async function transformRequest(
     if (preservedIdentity) {
       sysTail.push({ type: 'text', text: preservedIdentity });
     }
-    // billingLine carries `cc_prev_req` on CLI >= 2.1.222, so it changes every
-    // turn. It sits with the other churny blocks below, after the anchor and
-    // outside the slab, where per-turn drift costs nothing.
-    if (billingLine) sysTail.push({ type: 'text', text: billingLine });
+    // billingLine is deliberately NOT re-emitted into the body. Every system
+    // block precedes the last cache-control marker, so a per-turn value here
+    // invalidates the whole cached prefix. proxy.ts forwards it as the HTTP
+    // header it names; the model never needs to read this transport metadata.
     if (dynamicText) sysTail.push({ type: 'text', text: dynamicText });
     if (envMarkdown) sysTail.push({ type: 'text', text: envMarkdown });
     if (Array.isArray(sysRemainder)) sysTail.push(...sysRemainder);

@@ -190,6 +190,13 @@ function parseCli(argv: string[]): RuntimeConfig {
       console.error(`[pxpipe] this build accepts no flags; run \`pxpipe --help\` for env vars`);
       process.exit(2);
     }
+    console.error(`[pxpipe] unknown command: ${a}`);
+    if (/^codex(?:[-_.].+)?$/i.test(a)) {
+      console.error(`[pxpipe] alternate Codex executables use: pxpipe codex --binary ${a}`);
+    } else {
+      console.error('[pxpipe] run `pxpipe --help` for supported commands');
+    }
+    process.exit(2);
   }
   applyConfigFileDefaults();
   const sharedUpstream = process.env.PXPIPE_UPSTREAM;
@@ -237,6 +244,7 @@ function parseProvider(v: string | undefined): 'cloudflare-ai-gateway' | 'feathe
   if (v === 'cloudflare-ai-gateway' || v === 'featherless') return v;
   console.error(`[pxpipe] unknown PXPIPE_PROVIDER: ${v}`);
   process.exit(2);
+  throw new Error('unreachable after process.exit');
 }
 
 function parseFeatherlessTransform(v: string | undefined): 'off' | 'auto' | 'force' {
@@ -245,10 +253,11 @@ function parseFeatherlessTransform(v: string | undefined): 'off' | 'auto' | 'for
   if (norm === 'off' || norm === 'auto' || norm === 'force') return norm as 'off' | 'auto' | 'force';
   console.error(`[pxpipe] unknown PXPIPE_FEATHERLESS_TRANSFORM: ${v}`);
   process.exit(2);
+  throw new Error('unreachable after process.exit');
 }
 
 function printHelp(): void {
-  console.log(`pxpipe — token-saving proxy for Claude Code
+  console.log(`pxpipe — coding-agent context compression proxy
 
 Usage:
   pxpipe                run the proxy (no flags)
@@ -284,7 +293,7 @@ The proxy compresses eligible context according to a semantic safety profile,
 tracks events to disk, and measures real saved_pct via /v1/messages/count_tokens.
 Dashboard controls can disable compression live.
 
-Stats, sessions, and cleanup tools live in the dashboard at
+Stats and session diagnostics live in the dashboard at
   http://127.0.0.1:<port>/  (default port 47821)
 
 Flags:
@@ -344,6 +353,10 @@ Environment:
   PXPIPE_DEBUG_CAPTURE_4XX  debug: set to 1 to persist full 4xx request and
                           upstream error bodies (prompts + any secrets in
                           context) to disk. Off by default.
+  PXPIPE_MAX_REQUEST_BYTES hard ceiling for buffered transformable request bodies
+                          (default 16777216 / 16 MiB)
+  PXPIPE_RENDER_CACHE_BYTES byte budget for the in-process render memoization cache
+                          (default 67108864 / 64 MiB)
 
 Use with Claude Code:
   ANTHROPIC_BASE_URL=http://127.0.0.1:47821 claude
@@ -482,7 +495,12 @@ function waitForDrain(out: ServerResponse): Promise<void> {
 async function writeWebResponse(res: Response, out: ServerResponse): Promise<void> {
   out.statusCode = res.status;
   res.headers.forEach((v, k) => out.setHeader(k, v));
-  if (!res.body) {
+  // HEAD must return the GET metadata without attempting to stream a body.
+  // node:http suppresses HEAD response bytes at the socket layer, but reading
+  // and writing the Web Response body can still race the client closing after
+  // headers and surface a spurious response-close error in our bridge.
+  if (out.req?.method === 'HEAD' || !res.body) {
+    if (res.body) void res.body.cancel().catch(() => undefined);
     out.end();
     return;
   }
@@ -584,7 +602,11 @@ async function dispatchDashboard(
   url: URL,
   port: number,
 ): Promise<Response | undefined> {
-  const method = req.method ?? 'GET';
+  const rawMethod = req.method ?? 'GET';
+  // HEAD is a local health/probe operation for read-only dashboard routes.
+  // Treat it as GET here so `curl -I http://127.0.0.1:47821/` never falls
+  // through to an upstream provider merely because the dashboard is GET-only.
+  const method = rawMethod === 'HEAD' ? 'GET' : rawMethod;
   switch (route.kind) {
     case 'html':
       if (method !== 'GET') return undefined;
@@ -987,6 +1009,7 @@ async function collectSource(opts: ExportParsed): Promise<[string, string[]]> {
     if (diff === null) {
       console.error(`[pxpipe export] git diff ${opts.diff} failed`);
       process.exit(1);
+      throw new Error('unreachable after process.exit');
     }
     return [diff, []];
   }
@@ -1090,11 +1113,13 @@ async function runExport(argv: string[]): Promise<void> {
   if (parseResult.kind === 'help') {
     printExportHelp();
     process.exit(0);
+    return;
   }
   if (parseResult.kind === 'error') {
     console.error(`[pxpipe export] ${parseResult.message}`);
     console.error(`[pxpipe export] run \`pxpipe export --help\` for usage`);
     process.exit(2);
+    return;
   }
 
   const opts = parseResult.parsed;
@@ -1154,6 +1179,7 @@ async function runClaudeLaunch(argv: readonly string[]): Promise<void> {
   } catch (error) {
     console.error(`[pxpipe] claude: ${(error as Error).message}`);
     process.exit(2);
+    return;
   }
 
   const command = [invocation.binary, ...invocation.args];
@@ -1241,6 +1267,15 @@ async function main(): Promise<void> {
       rest.push(a);
     }
     cliArgv = rest;
+    if (warpCommand?.[0] && warpRoutes.length === 0) {
+      const base = path.basename(warpCommand[0]);
+      if (/^codex(?:[-_.].+)?(?:\.exe)?$/i.test(base)) {
+        console.error('[pxpipe] warp is not the Codex integration path.');
+        console.error(`[pxpipe] use: pxpipe codex --binary ${base}`);
+        console.error('[pxpipe] this preserves CODEX_HOME/auth and uses the dedicated Responses route.');
+        process.exit(2);
+      }
+    }
   }
   // Stats / sessions / cleanup tools live in the dashboard
   // (see http://127.0.0.1:${port}/).
@@ -1626,6 +1661,13 @@ async function main(): Promise<void> {
             await writeWebResponse(webRes, res);
             return;
           }
+          // A path owned by the loopback dashboard must never become a provider
+          // request just because its HTTP method is unsupported.
+          await writeWebResponse(new Response('method not allowed', {
+            status: 405,
+            headers: { allow: 'GET, HEAD' },
+          }), res);
+          return;
         }
         // Readiness introspection for `pxpipe doctor codex` and friends: which
         // provider routes this listener actually serves. Loopback-only and

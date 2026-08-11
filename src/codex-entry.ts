@@ -129,6 +129,7 @@ function resolveBinary(invocation: CodexInvocation): string {
     );
     console.error('[pxpipe] codex: install Codex, or select another one with --binary NAME');
     process.exit(127);
+    throw new Error('unreachable after process.exit');
   }
   return binary;
 }
@@ -340,6 +341,7 @@ export async function runCodexEntry(argv: readonly string[]): Promise<void> {
   } catch (error) {
     console.error(`[pxpipe] codex: ${(error as Error).message}`);
     process.exit(2);
+    return;
   }
 
   const binary = resolveBinary(invocation);

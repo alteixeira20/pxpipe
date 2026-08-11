@@ -63,5 +63,5 @@ export function readExportTextFile(
     return { kind: 'inaccessible' };
   }
   if (looksLikeBinary(buf)) return { kind: 'binary' };
-  return { kind: 'ok', content: buf.toString('utf8') };
+  return { kind: 'ok', content: new TextDecoder().decode(buf) };
 }

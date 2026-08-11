@@ -445,6 +445,7 @@ async function runAgyProcess(args: readonly string[], routeSpecs: readonly strin
   if (!binary) {
     console.error('[pxpipe] agy: executable not found on PATH');
     process.exit(127);
+    return;
   }
 
   const debug = /^(?:1|true|yes|on)$/i.test(process.env.PXPIPE_AGY_DEBUG ?? '');
@@ -471,6 +472,7 @@ async function runAgyProcess(args: readonly string[], routeSpecs: readonly strin
   } catch (error) {
     console.error(`[pxpipe] agy: invalid route: ${(error as Error).message}`);
     process.exit(2);
+    return;
   }
 
   const ca = CertificateAuthority.loadOrCreate(join(homedir(), '.pxpipe'));

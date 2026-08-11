@@ -1296,7 +1296,7 @@ describe('transform', () => {
     });
   });
 
-  it('strips x-anthropic-billing-header line and keeps it as text', async () => {
+  it('strips x-anthropic-billing-header from the body and exposes it for HTTP forwarding', async () => {
     const sysText = 'x-anthropic-billing-header: cch=abc123\n' + 'real prompt text. '.repeat(2500);
     const req = JSON.stringify({
       model: 'claude-3-5-sonnet',
@@ -1307,9 +1307,9 @@ describe('transform', () => {
     const { body, info } = await transformRequest(bytes);
     expect(info.compressed).toBe(true);
 
-    const out = JSON.parse(new TextDecoder().decode(body));
-    const textBlocks = out.system.filter((b: any) => b.type === 'text');
-    expect(textBlocks.some((b: any) => b.text.includes('x-anthropic-billing-header'))).toBe(true);
+    const outText = new TextDecoder().decode(body);
+    expect(outText).not.toContain('x-anthropic-billing-header');
+    expect(info.billingLine).toBe('x-anthropic-billing-header: cch=abc123');
   });
 
   // The billing header is per-turn on CLI >= 2.1.222, so the slab must render
@@ -1361,7 +1361,7 @@ describe('transform', () => {
       expect(await slabOf(`${CLEAN}\n${HDR}`)).toBe(await slabOf(CLEAN));
     });
 
-    it('relocates the header to the system tail from every position', async () => {
+    it('extracts the header for transport from every position without re-emitting it', async () => {
       for (const system of [`${HDR}\n${CLEAN}`, `${HEAD}\n${HDR}\n${TAIL}`, `${CLEAN}\n${HDR}`]) {
         const bytes = new TextEncoder().encode(
           JSON.stringify({
@@ -1370,10 +1370,9 @@ describe('transform', () => {
             system,
           }),
         );
-        const { body } = await transformRequest(bytes);
-        const out = JSON.parse(new TextDecoder().decode(body));
-        const texts = out.system.filter((b: any) => b.type === 'text').map((b: any) => b.text);
-        expect(texts.some((t: string) => t.includes(HDR))).toBe(true);
+        const { body, info } = await transformRequest(bytes);
+        expect(new TextDecoder().decode(body)).not.toContain(HDR);
+        expect(info.billingLine).toBe(HDR);
       }
     });
   });
