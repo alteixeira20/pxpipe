@@ -24,7 +24,11 @@ jobs:
           cache: pnpm
       - name: Reconstruct exact patch
         run: |
+          wc -c .github/rc/runtime.part*
+          sha256sum .github/rc/runtime.part*
           cat .github/rc/runtime.part* | base64 -d > /tmp/runtime.patch
+          wc -c /tmp/runtime.patch
+          sha256sum /tmp/runtime.patch
           echo '4501be8f67e193c1d1fc723f4aeb0e089d9eb775d653b38fd3463bc46d62a7d0  /tmp/runtime.patch' | sha256sum -c -
           git apply --check /tmp/runtime.patch
           git apply /tmp/runtime.patch
