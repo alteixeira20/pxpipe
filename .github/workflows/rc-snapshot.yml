@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - stabilize/rc-runtime-parity-20260811
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: write
@@ -52,6 +55,7 @@ jobs:
       - run: pnpm exec wrangler deploy --dry-run
       - run: git diff --check
       - name: Commit validated source
+        if: github.event_name == 'push'
         run: |
           rm -rf .github/rc .github/workflows/rc-snapshot.yml
           git add -A
