@@ -34,16 +34,30 @@ jobs:
           echo 'dec97e2b0e4ccb53042fa6277c9008f9d2536f4076f89166dfad969938608a1b  /tmp/ts7.patch' | sha256sum -c -
           git apply --check /tmp/ts7.patch
           git apply /tmp/ts7.patch
-      - name: Reconstruct exact HEAD and billing regression patch
+      - name: Apply final HEAD and billing regression fixes
         run: |
-          wc -c .github/rc/headfix.part*
-          sha256sum .github/rc/headfix.part*
-          cat .github/rc/headfix.part* | base64 -d > /tmp/headfix.patch
-          wc -c /tmp/headfix.patch
-          sha256sum /tmp/headfix.patch
-          echo '4d047e223718490671685c45ae259f1f40402dfa4cfd3f5d6efd289d4fdc5cae  /tmp/headfix.patch' | sha256sum -c -
-          git apply --check /tmp/headfix.patch
-          git apply /tmp/headfix.patch
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('src/node.ts')
+          s = p.read_text()
+          old = """async function writeWebResponse(res: Response, out: ServerResponse): Promise<void> {\n  out.statusCode = res.status;\n  res.headers.forEach((v, k) => out.setHeader(k, v));\n  if (!res.body) {\n    out.end();\n    return;\n  }\n"""
+          new = """async function writeWebResponse(res: Response, out: ServerResponse): Promise<void> {\n  out.statusCode = res.status;\n  res.headers.forEach((v, k) => out.setHeader(k, v));\n  // HEAD must return the GET metadata without attempting to stream a body.\n  // node:http suppresses HEAD response bytes at the socket layer, but reading\n  // and writing the Web Response body can still race the client closing after\n  // headers and surface a spurious response-close error in our bridge.\n  if (out.req?.method === 'HEAD' || !res.body) {\n    if (res.body) void res.body.cancel().catch(() => undefined);\n    out.end();\n    return;\n  }\n"""
+          assert old in s
+          p.write_text(s.replace(old, new))
+
+          p = Path('tests/render.test.ts')
+          s = p.read_text()
+          s = s.replace("it('strips x-anthropic-billing-header line and keeps it as text', async () => {", "it('strips x-anthropic-billing-header from the body and exposes it for HTTP forwarding', async () => {")
+          old = """    const out = JSON.parse(new TextDecoder().decode(body));\n    const textBlocks = out.system.filter((b: any) => b.type === 'text');\n    expect(textBlocks.some((b: any) => b.text.includes('x-anthropic-billing-header'))).toBe(true);\n"""
+          new = """    const outText = new TextDecoder().decode(body);\n    expect(outText).not.toContain('x-anthropic-billing-header');\n    expect(info.billingLine).toBe('x-anthropic-billing-header: cch=abc123');\n"""
+          assert old in s
+          s = s.replace(old, new)
+          s = s.replace("it('relocates the header to the system tail from every position', async () => {", "it('extracts the header for transport from every position without re-emitting it', async () => {")
+          old = """        const { body } = await transformRequest(bytes);\n        const out = JSON.parse(new TextDecoder().decode(body));\n        const texts = out.system.filter((b: any) => b.type === 'text').map((b: any) => b.text);\n        expect(texts.some((t: string) => t.includes(HDR))).toBe(true);\n"""
+          new = """        const { body, info } = await transformRequest(bytes);\n        expect(new TextDecoder().decode(body)).not.toContain(HDR);\n        expect(info.billingLine).toBe(HDR);\n"""
+          assert old in s
+          p.write_text(s.replace(old, new))
+          PY
       - name: Refresh dependency lock
         run: |
           pnpm install --no-frozen-lockfile
