@@ -56,6 +56,7 @@ describe('provider route parsing', () => {
 
   it('does not treat incomplete or malformed paths as valid provider routes', () => {
     expect(parseProviderRoute('/v1/messages')).toBeNull();
+    expect(parseProviderRoute('/providers')).toBeNull();
     expect(parseProviderRoute('/providers/')).toBeNull();
     expect(parseProviderRoute('/providers/OpenAI/v1/chat/completions')).toBeNull();
     expect(parseProviderRoute('/providers/openai-alt')).toBeNull();
@@ -159,6 +160,7 @@ describe('provider router', () => {
   });
 
   it.each([
+    '/providers',
     '/providers/',
     '/providers/OpenAI/v1/chat/completions',
     '/providers/openai-alt',
