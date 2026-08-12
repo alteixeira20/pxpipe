@@ -35,7 +35,8 @@ export interface ProviderRouterInspection {
 }
 
 const PROVIDER_ID = /^[a-z][a-z0-9-]{0,62}$/;
-const PREFIX = '/providers/';
+const PROVIDER_ROOT = '/providers';
+const PREFIX = `${PROVIDER_ROOT}/`;
 
 export function assertProviderId(id: string): void {
   if (!PROVIDER_ID.test(id)) {
@@ -64,6 +65,10 @@ export function parseProviderRoute(pathname: string): ParsedProviderRoute | null
   const upstreamPath = remainder.slice(slash);
   if (!upstreamPath.startsWith('/') || upstreamPath.startsWith('//')) return null;
   return { providerId, upstreamPath };
+}
+
+function isProviderNamespace(pathname: string): boolean {
+  return pathname === PROVIDER_ROOT || pathname.startsWith(PREFIX);
 }
 
 function wrapProviderObserver(
@@ -140,9 +145,9 @@ export function createProviderRouter(
   const route = async (request: Request): Promise<Response> => {
     const pathname = new URL(request.url).pathname;
     const parsed = parseProviderRoute(pathname);
-    // `/providers/` is a reserved internal namespace. Malformed explicit routes
+    // `/providers` is a reserved internal namespace. Malformed explicit routes
     // must never fall through to the legacy/default upstream.
-    if (!parsed) return pathname.startsWith(PREFIX) ? invalidProviderRoute() : defaultHandler(request);
+    if (!parsed) return isProviderNamespace(pathname) ? invalidProviderRoute() : defaultHandler(request);
 
     const handler = handlers.get(parsed.providerId);
     if (!handler) {
