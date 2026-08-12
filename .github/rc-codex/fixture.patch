@@ -1,0 +1,16 @@
+--- a/tests/openai-gpt5.test.ts
++++ b/tests/openai-gpt5.test.ts
+@@ -1444,7 +1444,12 @@
+       });
+       input.push({
+         type: 'custom_tool_call_output', call_id: id,
+-        output: `file-${i} ${'stable repository content identifier function_name path/to/file '.repeat(950)}`,
++        output: Array.from({ length: 120 }, (_, j) =>
++          'file_' + i + '_' + j + '.ts symbol_' + i + '_' + j +
++          ' arg_' + j + '=value_' + i + '_' + j +
++          ' checksum=' + (i * 1000 + j).toString(16).padStart(8, '0') +
++          ' path=/tmp/repo_' + i + '/module_' + j + '/handler_' + j + '.ts'
++        ).join('\n'),
+       });
+     }
+     input.push({ role: 'assistant', content: 'Still working on the live task.' });
