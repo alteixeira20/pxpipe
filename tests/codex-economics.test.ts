@@ -320,3 +320,17 @@ describe('Codex economics event tail', () => {
     }
   });
 });
+
+describe('Codex report diagnostics', () => {
+  it('separates optimizer/history decisions and stream termination categories', () => {
+    const report = buildCodexEconomicsReport([
+      event({ compressed: false, reason: 'below_min_chars', history_reason: 'cache_preservation', stream_termination: 'response_terminal' }),
+      event({ compressed: false, reason: 'below_min_chars', history_reason: 'not_material', stream_termination: 'client_aborted' }),
+      event({ compressed: true, input_tokens: 1000, baseline_imaged_tokens: 500, image_tokens: 100, stream_termination: 'response_terminal' }),
+    ]);
+    expect(report.decisionReasons).toMatchObject({ below_min_chars: 2, transformed: 1 });
+    expect(report.historyReasons).toMatchObject({ cache_preservation: 1, not_material: 1 });
+    expect(report.streamTerminations).toMatchObject({ response_terminal: 2, client_aborted: 1 });
+    expect(report.abnormalStreamTerminations).toBe(1);
+  });
+});

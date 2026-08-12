@@ -57,7 +57,11 @@ export interface CodexEconomicsReport {
   netNegativeTransforms: number;
   lowMarginTransforms: number;
   safetyFlagged: number;
+  /** Backwards-compatible aggregate; prefer streamTerminations for diagnosis. */
   abnormalStreamTerminations: number;
+  decisionReasons: Record<string, number>;
+  historyReasons: Record<string, number>;
+  streamTerminations: Record<string, number>;
   transformed: CodexEconomicsCohort;
   passthrough: CodexEconomicsCohort;
   abReady: boolean;
@@ -206,6 +210,12 @@ export function buildCodexEconomicsReport(
   let lowMarginTransforms = 0;
   let safetyFlagged = 0;
   let abnormalStreamTerminations = 0;
+  const decisionReasons: Record<string, number> = {};
+  const historyReasons: Record<string, number> = {};
+  const streamTerminations: Record<string, number> = {};
+  const bump = (map: Record<string, number>, key: string): void => {
+    map[key] = (map[key] ?? 0) + 1;
+  };
 
   for (const event of events) {
     const usage = eventUsage(event);
@@ -221,8 +231,11 @@ export function buildCodexEconomicsReport(
       effectiveBaselineInput += eff.baseline;
     }
     if (event.safety_flagged) safetyFlagged += 1;
-    if (event.stream_termination && event.stream_termination !== 'response_terminal') {
-      abnormalStreamTerminations += 1;
+    bump(decisionReasons, event.compressed === true ? 'transformed' : (event.reason ?? 'native_unspecified'));
+    if (event.history_reason) bump(historyReasons, event.history_reason);
+    if (event.stream_termination) {
+      bump(streamTerminations, event.stream_termination);
+      if (event.stream_termination !== 'response_terminal') abnormalStreamTerminations += 1;
     }
 
     if (event.compressed !== true) continue;
@@ -354,6 +367,9 @@ export function buildCodexEconomicsReport(
     lowMarginTransforms,
     safetyFlagged,
     abnormalStreamTerminations,
+    decisionReasons,
+    historyReasons,
+    streamTerminations,
     transformed,
     passthrough,
     abReady,

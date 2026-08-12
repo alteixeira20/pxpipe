@@ -218,87 +218,95 @@ pxpipe stays cache-aligned by replacing stable text context with stable image co
 
 ## OpenAI / Responses Path (Codex And Friends)
 
-Codex is supported. The wire protocol is `/v1/responses` (and, when present,
-chat-completions-shaped OpenAI paths). pxpipe images the same two buckets as
-on Anthropic: the static slab (system + tool docs + large stable context) and,
-when the closed history prefix clears a token floor and the profitability gate,
-older history.
+OpenAI Responses exposes `cached_tokens` as a subset of provider input rather
+than Anthropic-style cache-create/cache-read buckets. PXPipe therefore reports
+two distinct measurements:
 
-The savings number is still "text counterfactual under the same observed cache
-state minus the imaged request." OpenAI usage reports `cached_tokens` as a
-subset of `input_tokens` (not a separate cache-create / cache-read pair). The
-math lives in `src/core/openai-savings.ts`:
+- **raw provider-input shrink**: exact represented text minus image tokens minus
+  PXPipe-native framing;
+- **cache-weighted effective shrink**: the same counterfactual weighted by the
+  serving model profile's observed cached-input rate.
+
+The raw view answers whether the wire request got smaller. The weighted view
+answers whether changing that already-cached region was economically meaningful.
+PXPipe does not claim which one an opaque subscription quota meter uses.
+
+### Codex is cache-first, not image-first
+
+The dedicated `pxpipe codex` route is intentionally more selective than a
+generic OpenAI-compatible Responses transform. Codex has strong prefix caching
+and native `/responses/compact`; a small positive image delta is not enough to
+justify rewriting a warm prefix.
+
+For `gpt-5.6-sol`, the Codex optimizer:
+
+1. understands completed function and custom-tool call/output rounds;
+2. leaves open/orphan/malformed/referenced/opaque state native;
+3. seals old history into immutable token-sized sections and leaves the newest
+   partial section as text;
+4. evaluates the **whole candidate**, including fact-sheet/framing overhead;
+5. requires material absolute, percentage and per-image savings;
+6. observes the previous provider `cached_tokens` before changing representation;
+7. refuses a first image epoch when the native prefix is already warm;
+8. once a compressed epoch is warm, accepts only append-only history pages whose
+   prior page hashes remain an exact prefix;
+9. preserves `/responses/compact` byte-for-byte.
+
+This means `compressed=false` can be the correct and most efficient outcome. A
+request may have a large raw context and still remain native because the exact
+prefix PXPipe would replace is already cheap in provider cache.
+
+### Why tiny positive transforms are rejected
+
+The generic image gate historically answered only:
 
 ```text
-actual_eff   = uncached + cached * cache_read_rate(model)
-baseline_eff = actual_eff + (baseline_imaged_tokens - image_tokens)
-               * (cache_read_rate(model) if cached > 0 else 1.0)
+image_tokens < represented_text_tokens
 ```
 
-`cache_read_rate` is model-based on the shared Responses path (Claude 0.1,
-gpt-5 0.1, Grok 0.25). The provider cache discount is applied to both sides, so
-it is never counted as a pxpipe win.
+That is insufficient for Codex. A history plan can also add native transcript
+framing/fact-sheet tokens, and changing an otherwise warm prefix can lose far
+more cache value than the raw delta saves. The dedicated route therefore gates
+on:
 
-### What actually drives savings
+```text
+net_raw = represented_text - image_tokens - pxpipe_native_text
+```
 
-Savings track **how much uncached bulk the client still re-sends as text**, not
-the product name and not the path alone.
+and then applies cache-stability policy before the request is rewritten. The
+dashboard/report uses the same recorded counters, so a candidate rejected by the
+optimizer is not later presented as a tiny successful transform.
 
-| Client shape | What the proxy sees each turn | Typical result |
-|---|---|---|
-| Claude Code on `/anthropic/messages` | Large system + tools + history re-sent as text; Anthropic cache markers on a stable prefix | High savings once imaged (~60–70% on dense traffic) |
-| Codex / OpenAI Responses with a warm prompt cache | Most of the prompt already `cached_tokens`; only the static slab and rare history collapses are imageable | Low % when history does not collapse; the % is honest |
-| Same Responses path, history collapse fires | Closed prefix large enough and profitable → many history images | Meaningful savings (measured gpt-5 collapsed warm rows ~40%) |
-| OpenAI client that re-sends the full transcript as plain text every turn (classic chat-completions style, cold or no useful cache) | Large uncached bulk every request | Same class of win as Claude Code: the gate has real text to beat |
+### Diagnostics
 
-Measured on local `/v1/responses` rows (same endpoint, different models):
+`responses_composition` breaks out native Responses state, including function
+and custom-tool calls/outputs and their completed/recent/old/open/orphan/malformed
+counts. `barrierTypes` names unknown/opaque items that still split otherwise safe
+history runs. Codex-specific fields also expose candidate raw saving, percentage,
+per-image saving, prior cache share, stable page-prefix length and the cache
+decision.
 
-| Family | Cached share of input | History collapse | Computed saved |
-|---|---:|---|---:|
-| claude (Codex → Opus) | ~98% | was blocked by a row-count gate bug; should collapse after the ↵ fix | was ~1% slab-only; re-measure on live Codex |
-| grok | high on warm multi-turn | **collapsed** after ↵ gate fix | ~**35%** on collapsed Responses rows (n=35 post-fix); fixture image+factsheet ~70% |
-| gpt-5 | ~73% | often | ~34% overall; ~42% on collapsed warm rows |
+Use:
 
-Render profiles are selected by exact model id, not by the shared Responses
-path. Opt-in `gpt-5.6-sol` uses 84 columns with a native 9×16 JetBrains Mono
-14px atlas; Claude uses 312 columns with the 5×8 Spleen atlas. Grok remains **opt-in** and
-uses **native 14px** / 84 columns at maxHeight 512 with white AA (**no grid**) plus an
-in-image IDS block and the text factsheet. Its measured arithmetic, gist, and
-state results remain below Fable. See
-[eval/grok-density/native-sweep/RESULTS.md](../eval/grok-density/native-sweep/RESULTS.md).
+```bash
+pxpipe codex report --model gpt-5.6-sol
+```
 
-The early n=1 raw-image pilot failed both 6×11 and the old shared 5×8
-call. The 5×8 production-profile follow-up scored 96/100 pure and
-98/100 production arithmetic, but broader gist and dense exact recall remained
-below Fable. Sol is kept opt-in; sibling GPT-5.6 variants remain off.
-The current 9×16 profile scored 7/8 exact across two raw-image fixtures,
-with one truncated identifier and no unsupported inventions; it did not clear
-the strict byte-exact acceptance bar.
-Production still sends the identifier factsheet because image text is not byte-safe. See
-[`eval/sol-profile/QUALITY_RESULTS.md`](../eval/sol-profile/QUALITY_RESULTS.md).
+The report separates optimizer decisions, history abstention reasons, and stream
+termination categories (`response_terminal`, `client_aborted`,
+`upstream_ended_without_usage`) instead of collapsing every non-terminal lifecycle
+into one undifferentiated label.
 
+For a controlled native-text arm:
 
-So "Codex shows 1% on Opus" is not "Codex unsupported." It is "this session's
-prompt was already ~98% cached text, history collapse did not fire, and only
-the static slab was imaged." The same Codex path saves tens of percent when
-history collapse fires (gpt-5 above) or when the client re-sends uncached bulk.
+```bash
+pxpipe codex --passthrough
+```
 
-### Dashboard columns
+The passthrough arm keeps the same PXPipe routing/auth/telemetry path and disables
+only compression. Completed-task A/B remains the strongest evidence because a
+per-request token win is not useful if it increases turns, tool calls, rereads,
+latency or task failures.
 
-On OpenAI-shaped rows the dashboard fills **As text / Sent / Saved** only when
-the request was compressed and both `image_tokens` and `baseline_imaged_tokens`
-were recorded. Uncompressed rows (gate said `not_profitable`, model not
-allowlisted, etc.) correctly show `—`. Path selects the accounting shape
-(OpenAI vs Anthropic usage fields); model id selects rates and render profile.
-
-### Practical reading of a low Saved %
-
-1. Check `path`. `/anthropic/messages` and `/v1/responses` are different
-   clients even when the model id is `claude-opus-4-8`.
-2. Check `cached_tokens / input_tokens`. Near 100% means there is little left
-   for imaging to beat under honest same-cache accounting.
-3. Check `history_reason`. `collapsed` is where large Codex/OpenAI savings
-   come from; `not_profitable` / `below_min_tokens` / `prefix_too_short` mean
-   only the slab (or nothing) was imaged.
-4. Do not compare a Claude Code session's 70% to a warm Codex session's 1%
-   as a regression. Different wire, different uncached bulk.
+See [`CODEX_INTEGRATION.md`](CODEX_INTEGRATION.md) for the route and cache-stable
+history policy.

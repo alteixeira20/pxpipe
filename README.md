@@ -29,6 +29,22 @@ npx pxpipe-proxy
 
 The proxy listens on `127.0.0.1:47821` by default.
 
+Codex (ChatGPT-authenticated Responses route):
+
+```bash
+pxpipe codex
+# alternate Codex installation/account wrapper:
+pxpipe codex --binary codex-ar
+```
+
+The Codex integration is intentionally opportunistic. It preserves Codex's native
+`/responses/compact` behavior and strong automatic prompt cache, understands
+completed function/custom-tool rounds, and only creates history images when the
+whole candidate is materially smaller **and** doing so will not rewrite an
+observed warm native prefix. Native pass-through is a successful optimization
+outcome when Codex's own cache is already cheaper. See
+[`docs/CODEX_INTEGRATION.md`](docs/CODEX_INTEGRATION.md).
+
 Claude Code:
 
 ```bash

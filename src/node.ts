@@ -1518,6 +1518,7 @@ async function main(): Promise<void> {
         proxy: {
           ...config,
           decodeZstdRequests: true,
+          codexOptimization: true,
           provider: undefined,
           gatewayBaseUrl: undefined,
           gatewayHeaders: {},
