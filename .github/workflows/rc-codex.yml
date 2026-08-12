@@ -48,89 +48,11 @@ jobs:
             .github/rc-codex/part05 \
             .github/rc-codex/part06 \
             > /tmp/codex-feature.patch.gz
-          echo '47defa71879a24198a586704307bb8c7813559affde715db10ec4345b7d1529c  /tmp/codex-feature.patch.gz' | sha256sum -c -
+          echo 'ab023c6c70cd69cbfff63376d2e8c020c495fffe8d3bc5d24a5cc3d993e0eac1  /tmp/codex-feature.patch.gz' | sha256sum -c -
           gzip -dc /tmp/codex-feature.patch.gz > /tmp/codex-feature.patch
-          echo '8de7660b852b7154bdb64364a58cdadab5ed9944362e3304b307555870bb34e1  /tmp/codex-feature.patch' | sha256sum -c -
+          echo '730c4d6d33fe835fd979424abaaef78a4c361902ed8d2b0f173ee6d7bc3020aa  /tmp/codex-feature.patch' | sha256sum -c -
           git apply --3way --check /tmp/codex-feature.patch
           git apply --3way /tmp/codex-feature.patch
-          git diff --check
-      - name: Apply audited RC corrections
-        if: steps.gate.outputs.run == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          python - <<'PY'
-          from pathlib import Path
-
-          path = Path('src/core/transform.ts')
-          text = path.read_text()
-          needle = '  historyAmortizationHorizon: 1,\n  priorWarmTokens: 0,'
-          replacement = '  historyAmortizationHorizon: 1,\n  codexOptimization: false,\n  priorWarmTokens: 0,'
-          assert text.count(needle) == 1, 'unexpected TransformOptions DEFAULTS shape'
-          path.write_text(text.replace(needle, replacement))
-
-          path = Path('src/core/openai-history.ts')
-          text = path.read_text()
-          old = '''        if (isProfitable(rendered.renderedText, o.cols, selectedBaselineTokens)) {
-          const selectedIndices = selected.flatMap((unit) => unit.indices).sort((a, b) => a - b);
-          segments.push({
-            insertAt: selectedIndices[0]!,
-            selectedIndices,
-            images: rendered.images,
-            imageSources: rendered.images.map(() => rendered.source),
-            text: rendered.source,
-            baselineTokens: selectedBaselineTokens,
-          });
-          remainingImages -= rendered.images.length;
-        }
-        // A sealed section is immutable whether or not the economics gate chose
-        // to image it on this request. Starting the next section at the same
-        // deterministic boundary prevents later appends from changing earlier
-        // section membership.
-        sectionStart = i + 1;
-        sectionTokens = 0;
-'''
-          new = '''        if (!isProfitable(rendered.renderedText, o.cols, selectedBaselineTokens)) {
-          // Reaching the token target does not make an under-filled image worth
-          // sending. Keep accumulating this same deterministic section until its
-          // raw image cost beats native text; the first profitable boundary is
-          // then stable for every future append of this trajectory.
-          continue;
-        }
-        const selectedIndices = selected.flatMap((unit) => unit.indices).sort((a, b) => a - b);
-        segments.push({
-          insertAt: selectedIndices[0]!,
-          selectedIndices,
-          images: rendered.images,
-          imageSources: rendered.images.map(() => rendered.source),
-          text: rendered.source,
-          baselineTokens: selectedBaselineTokens,
-        });
-        remainingImages -= rendered.images.length;
-        // Seal only a physically/economically viable section. A tiny trailing
-        // island therefore stays native instead of becoming a cache-hostile PNG.
-        sectionStart = i + 1;
-        sectionTokens = 0;
-'''
-          assert text.count(old) == 1, 'unexpected Responses sectioning shape'
-          path.write_text(text.replace(old, new))
-
-          path = Path('tests/openai-gpt5.test.ts')
-          text = path.read_text()
-          assert text.count("        factSheetScope: 'combined',") == 1
-          text = text.replace("        factSheetScope: 'combined',", "        factSheetScope: 'per-segment',", 1)
-          old = "    expect(c.barrierTypes?.some((x) => x.startsWith('custom_tool_call:'))).not.toBe(true);"
-          new = "    const customBarriers = c.barrierTypes?.filter((x) => x.startsWith('custom_tool_call:')) ?? [];\n    expect(customBarriers.length).toBeLessThanOrEqual(1);"
-          assert text.count(old) == 1
-          path.write_text(text.replace(old, new))
-
-          path = Path('tests/openai-history.test.ts')
-          text = path.read_text()
-          old = "    expect(plan.barrierTypes?.has('custom_tool_call')).not.toBe(true);\n    expect(plan.barrierTypes?.has('custom_tool_call_output')).not.toBe(true);"
-          new = "    // The newest protected native custom-tool round is a deliberate barrier;\n    // older completed rounds must no longer create one barrier per call.\n    expect(plan.barrierTypes?.get('custom_tool_call') ?? 0).toBeLessThanOrEqual(1);\n    expect(plan.barrierTypes?.has('custom_tool_call_output')).not.toBe(true);"
-          assert text.count(old) == 1
-          path.write_text(text.replace(old, new))
-          PY
           git diff --check
       - name: Install
         if: steps.gate.outputs.run == 'true'
