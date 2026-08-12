@@ -301,6 +301,17 @@ async function runCodexReport(args: readonly string[]): Promise<void> {
   console.log(`  negative transforms: ${report.netNegativeTransforms}`);
   console.log(`  <5% raw-margin:      ${report.lowMarginTransforms}`);
   console.log('');
+  console.log('Optimizer decisions');
+  for (const [reason, count] of Object.entries(report.decisionReasons).sort((a, b) => b[1] - a[1])) {
+    console.log(`  ${reason}: ${count}`);
+  }
+  if (Object.keys(report.historyReasons).length > 0) {
+    console.log('  history:');
+    for (const [reason, count] of Object.entries(report.historyReasons).sort((a, b) => b[1] - a[1])) {
+      console.log(`    ${reason}: ${count}`);
+    }
+  }
+  console.log('');
   console.log('Observed routed cohorts (not a randomized experiment)');
   console.log(`  compressed:          n=${report.transformed.usageRequests}, avg effective input=${maybeNum(report.transformed.avgEffectiveInput)}, p50=${maybeNum(report.transformed.p50DurationMs, 'ms')}`);
   console.log(`  passthrough:         n=${report.passthrough.usageRequests}, avg effective input=${maybeNum(report.passthrough.avgEffectiveInput)}, p50=${maybeNum(report.passthrough.p50DurationMs, 'ms')}`);
@@ -313,8 +324,14 @@ async function runCodexReport(args: readonly string[]): Promise<void> {
   console.log(`  ${report.note}`);
   console.log('  Raw provider-input reduction and cache-weighted economics are deliberately separate. PXPipe does not assume which one an opaque ChatGPT subscription quota meter uses.');
   console.log('  Dollar savings are intentionally omitted for ChatGPT-authenticated Codex: subscription usage is not a per-token API invoice.');
-  if (report.safetyFlagged > 0 || report.abnormalStreamTerminations > 0) {
-    console.log(`  reliability flags: ${report.safetyFlagged} safety-classified, ${report.abnormalStreamTerminations} abnormal stream terminations`);
+  if (report.safetyFlagged > 0) {
+    console.log(`  safety-classified requests: ${report.safetyFlagged}`);
+  }
+  if (Object.keys(report.streamTerminations).length > 0) {
+    console.log('  stream terminations:');
+    for (const [reason, count] of Object.entries(report.streamTerminations).sort((a, b) => b[1] - a[1])) {
+      console.log(`    ${reason}: ${count}`);
+    }
   }
 }
 

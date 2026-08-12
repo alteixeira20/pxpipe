@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { isPxpipeSupportedGptModel } from '../src/core/applicability.js';
 import { openAIVisionTokens, visionTokensForModel, isClaudeModel, resolveVisionCost, transformOpenAIChatCompletions, transformOpenAIResponses } from '../src/core/openai.js';
 import { resolveGptProfile } from '../src/core/gpt-model-profiles.js';
+import { clearCodexCacheState, noteCodexCacheOutcome } from '../src/core/codex-cache-state.js';
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -14,6 +15,7 @@ let ambientPxpipeModels: string | undefined;
 beforeEach(() => {
   ambientPxpipeModels = process.env.PXPIPE_MODELS;
   delete process.env.PXPIPE_MODELS;
+  clearCodexCacheState();
 });
 afterEach(() => {
   if (ambientPxpipeModels === undefined) delete process.env.PXPIPE_MODELS;
@@ -1089,7 +1091,7 @@ describe('resolveGptProfile (Claude on Responses)', () => {
         keepRecentPairs: 1,
         minCollapseTokens: 1000,
         framing: 'compact',
-        factSheetScope: 'combined',
+        factSheetScope: 'per-segment',
       });
       expect(sol.factSheetFormat, model).toBe('full');
     }
@@ -1388,5 +1390,121 @@ describe('Grok history compression under default gate', () => {
     const serialized = JSON.stringify(out.input);
     expect(serialized).toContain(earlyHex);
     expect(serialized).toContain('47821');
+  });
+});
+
+describe('Codex cache-stable Responses optimizer', () => {
+  const customHistory = (pairs: number, mutateFirst = false): Array<Record<string, unknown>> => {
+    const items: Array<Record<string, unknown>> = [
+      { role: 'user', content: 'Initialize the repository and keep working until complete.' },
+    ];
+    for (let i = 0; i < pairs; i++) {
+      const id = `custom_${i}`;
+      items.push({
+        type: 'custom_tool_call', id: `ct_${id}`, call_id: id,
+        name: 'exec_command', input: `inspect ${i}`,
+      });
+      items.push({
+        type: 'custom_tool_call_output', call_id: id,
+        output: `${mutateFirst && i === 0 ? 'MUTATED ' : ''}result-${i} ${'repository output line with identifiers '.repeat(850)}`,
+      });
+    }
+    items.push({ role: 'assistant', content: 'Continuing the current task.' });
+    return items;
+  };
+
+  const bodyFor = (pairs: number, mutateFirst = false) => enc.encode(JSON.stringify({
+    model: 'gpt-5.6-sol',
+    instructions: 'Keep exact repository state and use tools carefully.',
+    input: customHistory(pairs, mutateFirst),
+  }));
+
+  it('accounts Codex custom tools explicitly instead of hiding them in other', async () => {
+    const result = await transformOpenAIResponses(bodyFor(10), { codexOptimization: false });
+    const c = result.info.responsesComposition!;
+    expect(c.customToolCalls ?? 0).toBeGreaterThan(0);
+    expect(c.customToolOutputs ?? 0).toBeGreaterThan(0);
+    expect(c.completedCustomToolPairs).toBe(10);
+    expect(c.malformedCustomToolItems).toBe(0);
+    const customBarriers = c.barrierTypes?.filter((x) => x.startsWith('custom_tool_call:')) ?? [];
+    expect(customBarriers.length).toBeLessThanOrEqual(1);
+  });
+});
+
+describe('Codex cache-stable admission', () => {
+  const build = (pairs: number): Uint8Array => {
+    const input: Array<Record<string, unknown>> = [
+      { role: 'user', content: 'Audit this repository thoroughly and continue until done.' },
+    ];
+    for (let i = 0; i < pairs; i++) {
+      const id = `cc_${i}`;
+      input.push({
+        type: 'custom_tool_call', id: `ct_${id}`, call_id: id,
+        name: 'exec_command', input: `read file ${i}`,
+      });
+      input.push({
+        type: 'custom_tool_call_output', call_id: id,
+        output: Array.from({ length: 120 }, (_, j) =>
+          'file_' + i + '_' + j + '.ts symbol_' + i + '_' + j +
+          ' arg_' + j + '=value_' + i + '_' + j +
+          ' checksum=' + (i * 1000 + j).toString(16).padStart(8, '0') +
+          ' path=/tmp/repo_' + i + '/module_' + j + '/handler_' + j + '.ts'
+        ).join('\n'),
+      });
+    }
+    input.push({ role: 'assistant', content: 'Still working on the live task.' });
+    return enc.encode(JSON.stringify({
+      model: 'gpt-5.6-sol',
+      instructions: 'Keep all live tool state exact.',
+      input,
+    }));
+  };
+
+  it('observes one native request before risking a first image epoch', async () => {
+    const first = await transformOpenAIResponses(build(12), { codexOptimization: true });
+    expect(first.info.firstUserSha8).toMatch(/^[0-9a-f]{8}$/);
+    expect(first.info.historyReason).toBe('cache_preservation');
+    expect(first.info.responsesComposition?.historyCacheDecision).toBe('no_prior_usage');
+    expect(first.info.collapsedImages ?? 0).toBe(0);
+  });
+
+  it('preserves a warm native Codex prefix but permits a material cold transition', async () => {
+    const probe = await transformOpenAIResponses(build(12), { codexOptimization: true });
+    const key = probe.info.firstUserSha8!;
+
+    noteCodexCacheOutcome(key, { inputTokens: 120_000, cachedTokens: 110_000, compressed: false });
+    const warm = await transformOpenAIResponses(build(12), { codexOptimization: true });
+    expect(warm.info.historyReason).toBe('cache_preservation');
+    expect(warm.info.responsesComposition?.historyCacheDecision).toBe('warm_native_blocked');
+    expect(warm.info.responsesComposition?.priorCacheSharePct).toBeGreaterThan(90);
+
+    noteCodexCacheOutcome(key, { inputTokens: 120_000, cachedTokens: 10_000, compressed: false });
+    const cold = await transformOpenAIResponses(build(12), { codexOptimization: true });
+    expect(cold.info.responsesComposition?.historyCacheDecision).toBe('cold_or_low_cache');
+    expect(cold.info.historyReason).toBe('collapsed');
+    expect(cold.info.collapsedImages ?? 0).toBeGreaterThan(0);
+    expect(cold.info.responsesComposition?.historyCandidateRawSaving ?? 0).toBeGreaterThan(1024);
+    expect(cold.info.responsesComposition?.historyCandidateRawSavingPct ?? 0).toBeGreaterThanOrEqual(15);
+  });
+
+  it('keeps an established warm image epoch only when old page bytes remain a prefix', async () => {
+    const probe = await transformOpenAIResponses(build(12), { codexOptimization: true });
+    const key = probe.info.firstUserSha8!;
+    noteCodexCacheOutcome(key, { inputTokens: 120_000, cachedTokens: 10_000, compressed: false });
+    const established = await transformOpenAIResponses(build(12), { codexOptimization: true });
+    expect(established.info.historyReason).toBe('collapsed');
+    const pages = established.info.historySegmentShas ?? [];
+    expect(pages.length).toBeGreaterThan(0);
+
+    noteCodexCacheOutcome(key, {
+      inputTokens: 130_000,
+      cachedTokens: 125_000,
+      compressed: true,
+      historySegmentShas: pages,
+    });
+    const stable = await transformOpenAIResponses(build(14), { codexOptimization: true });
+    expect(stable.info.responsesComposition?.historyCacheDecision).toBe('warm_append_only');
+    expect(stable.info.responsesComposition?.historyStablePrefixSegments).toBe(pages.length);
+    expect(stable.info.historyReason).toBe('collapsed');
   });
 });

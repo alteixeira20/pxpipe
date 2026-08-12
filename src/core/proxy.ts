@@ -4,6 +4,7 @@
  */
 
 import { markCacheDead, noteCacheOutcome, responseLeftNoCache } from './session-state.js';
+import { noteCodexCacheOutcome } from './codex-cache-state.js';
 import {
   noteTrajectoryCompression,
   observeAnthropicTrajectory,
@@ -99,6 +100,11 @@ export interface ProxyConfig {
    * transformation. Intended for the ChatGPT-authenticated Codex route; other
    * OpenAI-compatible routes retain their existing byte-for-byte behavior. */
   decodeZstdRequests?: boolean;
+  /** Dedicated Codex Responses optimizer. Enables protocol-aware custom-tool
+   * history planning plus materiality and prompt-cache-preservation gates. This
+   * is intentionally route-scoped; generic OpenAI-compatible users retain their
+   * historical transform policy. */
+  codexOptimization?: boolean;
   /** Abort the upstream request if response headers have not arrived within this
    *  many ms. Cleared once headers land, so long generations are unaffected.
    *  0 disables. */
@@ -1800,9 +1806,15 @@ export function createProxy(config: ProxyConfig = {}) {
         if ((bridgedGptMessages || bridgedChatMessages) && effectiveModel) {
           requestModel = effectiveModel;
         }
-        const profileOpts: TransformOptions = (modelOk
-          ? (featherlessProvider ? { ...transformOpts, imagePlacement: 'merge_first_user' as const, imageDetail: 'auto' as const } : transformOpts)
-          : { ...transformOpts, compress: false }) ?? { compress: false };
+        const routeTransformOpts: TransformOptions = {
+          ...(transformOpts ?? {}),
+          ...(config.codexOptimization ? { codexOptimization: true } : {}),
+        };
+        const profileOpts: TransformOptions = modelOk
+          ? (featherlessProvider
+              ? { ...routeTransformOpts, imagePlacement: 'merge_first_user' as const, imageDetail: 'auto' as const }
+              : routeTransformOpts)
+          : { ...routeTransformOpts, compress: false };
         const effectiveOpts = applyTrajectoryCircuitBreaker(profileOpts, trajectory);
         const bridgeBody = bridgedGptMessages
           ? (() => {
@@ -2299,6 +2311,14 @@ export function createProxy(config: ProxyConfig = {}) {
         usage?.cache_read_input_tokens,
         usage?.cache_creation_input_tokens,
       );
+      if (config.codexOptimization) {
+        noteCodexCacheOutcome(info?.firstUserSha8, {
+          inputTokens: usage?.input_tokens,
+          cachedTokens: usage?.cached_tokens,
+          compressed: Boolean(info?.compressed && (info?.imageCount ?? 0) > 0),
+          historySegmentShas: info?.historySegmentShas,
+        });
+      }
       fire(
         upstreamRes.status,
         info,
