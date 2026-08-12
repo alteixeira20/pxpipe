@@ -74,9 +74,6 @@ function wrapProviderObserver(
   return {
     ...definition.proxy,
     onRequest: async (event) => {
-      // Keep provider identity explicit even for generic OpenAI-compatible
-      // providers whose core handler would otherwise leave it unset.
-      event.provider ??= definition.id;
       await providerObserver?.(event);
       await routerObserver?.(definition.id, event);
     },
