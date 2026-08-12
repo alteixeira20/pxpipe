@@ -39,6 +39,10 @@ export function buildCodexProxyConfig(base: ProxyConfig): ProxyConfig {
 
     openAIModels: [],
     cloudflareModels: [],
+
+    // Cache/materiality-aware Responses history admission is deliberately
+    // enabled only on this isolated Codex route.
+    codexOptimization: true,
   };
 }
 
