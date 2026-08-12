@@ -54,6 +54,25 @@ jobs:
           git apply --3way --check /tmp/codex-feature.patch
           git apply --3way /tmp/codex-feature.patch
           git diff --check
+      - name: Use realistic token-dense Codex cache fixture
+        if: steps.gate.outputs.run == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('tests/openai-gpt5.test.ts')
+          text = path.read_text()
+          old = "        output: `file-${i} ${'stable repository content identifier function_name path/to/file '.repeat(950)}`,”
+          if old not in text:
+              old = "        output: `file-${i} ${'stable repository content identifier function_name path/to/file '.repeat(950)}`,”.replace(',”', '`,')
+          new = """        output: Array.from({ length: 120 }, (_, j) =>
+          `file_${i}_${j}.ts symbol_${i}_${j} arg_${j}=value_${i}_${j} checksum=${(i * 1000 + j).toString(16).padStart(8, '0')} path=/tmp/repo_${i}/module_${j}/handler_${j}.ts`
+        ).join('\\n'),"""
+          assert text.count(old) == 1, 'unexpected Codex cache fixture shape'
+          path.write_text(text.replace(old, new))
+          PY
+          git diff --check
       - name: Install
         if: steps.gate.outputs.run == 'true'
         run: pnpm install --frozen-lockfile
