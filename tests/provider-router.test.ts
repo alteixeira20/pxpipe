@@ -186,7 +186,7 @@ describe('provider router', () => {
     ));
     expect(response.status).toBe(200);
     expect(calls).toHaveLength(1);
-    expect(calls[0]!.url).toBe('https://legacy.example/v1/messages');
+    expect(calls[0]!.url).toBe('https://legacy.example/v1/messages?provider=openai-alt');
   });
 
   it('exposes only credential-free provider metadata', () => {
