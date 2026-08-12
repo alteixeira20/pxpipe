@@ -100,6 +100,16 @@ function rewriteProviderRequest(request: Request, route: ParsedProviderRoute): R
   return new Request(sourceUrl, init);
 }
 
+function invalidProviderRoute(): Response {
+  return new Response(
+    JSON.stringify({ error: 'invalid_provider_route' }),
+    {
+      status: 400,
+      headers: { 'content-type': 'application/json' },
+    },
+  );
+}
+
 /**
  * Create one request handler that multiplexes several provider-specific
  * `createProxy` instances behind one Web-standard request handler.
@@ -128,8 +138,11 @@ export function createProviderRouter(
   }
 
   const route = async (request: Request): Promise<Response> => {
-    const parsed = parseProviderRoute(new URL(request.url).pathname);
-    if (!parsed) return defaultHandler(request);
+    const pathname = new URL(request.url).pathname;
+    const parsed = parseProviderRoute(pathname);
+    // `/providers/` is a reserved internal namespace. Malformed explicit routes
+    // must never fall through to the legacy/default upstream.
+    if (!parsed) return pathname.startsWith(PREFIX) ? invalidProviderRoute() : defaultHandler(request);
 
     const handler = handlers.get(parsed.providerId);
     if (!handler) {
