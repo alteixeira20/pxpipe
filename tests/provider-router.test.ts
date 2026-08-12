@@ -54,7 +54,7 @@ describe('provider route parsing', () => {
     });
   });
 
-  it('does not treat incomplete or malformed paths as explicit provider routes', () => {
+  it('does not treat incomplete or malformed paths as valid provider routes', () => {
     expect(parseProviderRoute('/v1/messages')).toBeNull();
     expect(parseProviderRoute('/providers/')).toBeNull();
     expect(parseProviderRoute('/providers/OpenAI/v1/chat/completions')).toBeNull();
@@ -155,6 +155,33 @@ describe('provider router', () => {
       error: 'unknown_provider',
       provider: 'not-configured',
     });
+    expect(calls).toHaveLength(0);
+  });
+
+  it.each([
+    '/providers/',
+    '/providers/OpenAI/v1/chat/completions',
+    '/providers/openai-alt',
+    '/providers/openai-alt//v1/chat/completions',
+  ])('fails malformed reserved provider route %s closed', async (pathname) => {
+    const calls: FetchCall[] = [];
+    installEchoFetch(calls);
+    const router = createProviderRouter({
+      defaultProxy: { upstream: 'https://legacy.example' },
+      providers: [{
+        id: 'openai-alt',
+        protocol: 'openai',
+        proxy: { openAIUpstream: 'https://api.openai-alt.example' },
+      }],
+    });
+
+    const response = await router(new Request(`http://127.0.0.1:47821${pathname}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    }));
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: 'invalid_provider_route' });
     expect(calls).toHaveLength(0);
   });
 
